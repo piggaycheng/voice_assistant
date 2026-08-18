@@ -1,0 +1,31 @@
+services:
+  tts:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voice-assistant-tts
+    ports:
+      - "8001:8001"
+    volumes:
+      # 將 host 當前目錄 (src/tts) mount 到容器內 /app（包含 .venv、models 與程式碼）
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TTS_PORT=8001
+      - TTS_DEVICE=cpu
+      - TTS_DEFAULT_LANG=z
+      - TTS_DEFAULT_VOICE=zf_xiaoxiao
+      - TTS_DEFAULT_SPEED=1.0
+      - HF_HOME=/app/models
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stdin_open: true
+    tty: true
+    # 若具備 NVIDIA GPU 並已安裝 nvidia-container-toolkit，可取消註解以啟用 GPU 加速：
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]

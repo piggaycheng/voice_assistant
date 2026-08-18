@@ -6,20 +6,61 @@ import numpy as np
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from faster_whisper import WhisperModel
+from faster_whisper.vad import get_vad_model
 import uvicorn
 
 app = FastAPI(title="Faster-Whisper STT & Ollama Voice Assistant Server")
 
-# 全域 Whisper 模型實例
+# 全域模型實例
 model: WhisperModel = None
+vad_model = None
 
 SAMPLE_RATE = 16000
-SILENCE_THRESHOLD = float(os.getenv("SILENCE_THRESHOLD", "0.035"))  # 基礎聲音能量門檻 (預設提高至 0.035 避免雜音誤觸)
-SILENCE_DURATION_SEC = float(os.getenv("SILENCE_DURATION", "0.8"))  # 停頓多久視為說話結束 (秒)
-MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.5")) # 最小發話長度 (小於此長度視為雜音忽略)
+VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.35"))          # Silero 人聲判定門檻 (0.35 靈敏捕捉清輔音/弱起音)
+VAD_NEG_THRESHOLD = float(os.getenv("VAD_NEG_THRESHOLD", "0.20")) # 靜音/非人聲判定門檻 (0.20 避免句中氣音被過早切斷)
+SILENCE_DURATION_SEC = float(os.getenv("SILENCE_DURATION", "0.8")) # 停頓多久視為說話結束 (秒)
+MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.4")) # 最小發話長度 (小於此長度視為雜音忽略)
 MAX_BUFFER_SEC = 20.0  # 單次發話最大上限長度 (秒)
-PRE_ROLL_CHUNKS = 6    # 前置音訊緩衝 (約 300ms，保留開頭發音)
-CONSECUTIVE_FRAMES_TRIGGER = int(os.getenv("CONSECUTIVE_FRAMES", "3")) # 需連續 3 幀 (150ms) 達標才觸發
+PRE_ROLL_CHUNKS = int(os.getenv("PRE_ROLL_CHUNKS", "14")) # 前置音訊緩衝 (14 chunks = 700ms，完整保留開頭發音與自然聲學上下文)
+CONSECUTIVE_FRAMES_TRIGGER = int(os.getenv("CONSECUTIVE_FRAMES", "1")) # 1 幀達標即觸發錄音，零延遲響應
+
+class SileroVADStream:
+    """即時串流 Silero VAD (基於 ONNX)，維持每個連線獨立的 hidden state 與 context"""
+    def __init__(self, session):
+        self.session = session
+        self.reset()
+
+    def reset(self):
+        self.h = np.zeros((1, 1, 128), dtype=np.float32)
+        self.c = np.zeros((1, 1, 128), dtype=np.float32)
+        self.context = np.zeros((1, 64), dtype=np.float32)
+        self.remainder = np.array([], dtype=np.float32)
+
+    def process_chunk(self, audio_chunk: np.ndarray) -> list:
+        """處理傳入的音訊 chunk，切分為 512-sample (32ms) 區塊並計算人聲機率"""
+        if len(self.remainder) > 0:
+            audio = np.concatenate([self.remainder, audio_chunk])
+        else:
+            audio = audio_chunk
+
+        num_samples = 512
+        probs = []
+
+        while len(audio) >= num_samples:
+            chunk_512 = audio[:num_samples]
+            audio = audio[num_samples:]
+
+            # shape (1, 576) = 64 (context) + 512 (samples)
+            inp = np.concatenate([self.context, chunk_512.reshape(1, num_samples)], axis=1)
+            self.context = chunk_512[-64:].reshape(1, 64)
+
+            out, hn, cn = self.session.run(None, {"input": inp, "h": self.h, "c": self.c})
+            self.h = hn
+            self.c = cn
+            probs.append(float(out[0]))
+
+        self.remainder = audio
+        return probs
 
 # Ollama 串接設定
 ENABLE_LLM = os.getenv("ENABLE_LLM", "true").lower() in ("true", "1", "yes")
@@ -34,7 +75,7 @@ LLM_SYSTEM_PROMPT = os.getenv(
 
 @app.on_event("startup")
 def load_whisper_model():
-    global model
+    global model, vad_model
     model_size = os.getenv("WHISPER_MODEL", "small")
     device = os.getenv("WHISPER_DEVICE", "cpu")
     compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
@@ -43,9 +84,10 @@ def load_whisper_model():
     os.makedirs(download_root, exist_ok=True)
 
     print("=" * 50)
-    print(" 🎙️ 正在載入 faster-whisper 模型...")
+    print(" 🎙️ 正在載入 faster-whisper & Silero VAD 模型...")
     print(f" - Whisper 模型: {model_size} ({device}, {compute_type})")
     print(f" - 儲存路徑: {download_root}")
+    print(f" - Silero VAD 門檻: 人聲={VAD_THRESHOLD}, 靜音={VAD_NEG_THRESHOLD}")
     print(f" - LLM 串接: {'開啟' if ENABLE_LLM else '關閉'}")
     if ENABLE_LLM:
         print(f" - Ollama 位址: {OLLAMA_BASE_URL}")
@@ -54,6 +96,11 @@ def load_whisper_model():
         print(f" - 溫度係數 (Temperature): {LLM_TEMPERATURE}")
     print("=" * 50)
 
+    # 載入 Silero VAD (ONNX)
+    vad_model = get_vad_model()
+    print("Silero VAD 模型載入完成！")
+
+    # 載入 Whisper 模型
     model = WhisperModel(
         model_size,
         device=device,
@@ -132,9 +179,9 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
     """執行 STT 語音辨識並串接 LLM"""
     max_val = float(np.max(np.abs(full_audio)))
     
-    # 若最大音量過小（小於 0.04），代表只是微弱背景底噪或呼吸，直接忽略避免放大雜音
-    if max_val < 0.04:
-        print(f"[STT 忽略] 音量過小 (Max RMS={max_val:.4f})，視為環境雜音")
+    # 若最大音量極小（接近純靜音），直接忽略避免除以零
+    if max_val < 0.01:
+        print(f"[STT 忽略] 音量極小 (Max={max_val:.4f})，視為無效音訊")
         await websocket.send_json({"type": "status", "status": "empty"})
         return
 
@@ -202,7 +249,9 @@ async def websocket_stt_endpoint(websocket: WebSocket):
     is_speaking = False
     consecutive_voice_frames = 0
     silence_samples = 0
-    noise_floor = 0.01
+
+    # 建立該連線專屬的 Silero VAD 串流實例（維持獨立 hidden states）
+    vad_stream = SileroVADStream(vad_model.session)
 
     silence_samples_limit = int(SAMPLE_RATE * SILENCE_DURATION_SEC)
     min_speech_samples = int(SAMPLE_RATE * MIN_SPEECH_DURATION_SEC)
@@ -219,29 +268,27 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 if chunk_samples == 0:
                     continue
 
-                rms = float(np.sqrt(np.mean(chunk**2)))
+                # 透過 Silero VAD 計算此 chunk 中的人聲機率
+                probs = vad_stream.process_chunk(chunk)
+                speech_prob = max(probs) if probs else 0.0
 
-                if not is_speaking:
-                    noise_floor = 0.95 * noise_floor + 0.05 * rms
-
-                active_threshold = max(SILENCE_THRESHOLD, noise_floor * 2.2)
-
-                if rms > active_threshold:
+                if speech_prob >= VAD_THRESHOLD:
                     consecutive_voice_frames += 1
 
                     if not is_speaking:
                         if consecutive_voice_frames >= CONSECUTIVE_FRAMES_TRIGGER:
                             is_speaking = True
-                            print(f"[VAD] 偵測到人聲 (RMS={rms:.4f}, 底噪={noise_floor:.4f})，開始錄音...")
+                            print(f"[Silero VAD] 偵測到人聲 (機率={speech_prob:.2f})，開始錄音...")
                             await websocket.send_json({"type": "status", "status": "listening"})
                             audio_buffer.extend(list(pre_roll_buffer))
+                            pre_roll_buffer.clear()
                             audio_buffer.append(chunk)
                         else:
                             pre_roll_buffer.append(chunk)
                     else:
                         audio_buffer.append(chunk)
                         silence_samples = 0
-                else:
+                elif speech_prob < VAD_NEG_THRESHOLD:
                     consecutive_voice_frames = 0
 
                     if not is_speaking:
@@ -257,13 +304,21 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                             if len(full_audio) >= min_speech_samples:
                                 await process_transcription(full_audio, websocket, conversation_history)
                             else:
-                                print(f"[VAD] 聲音過短 ({len(full_audio)/SAMPLE_RATE:.2f}s)，判定為雜音已忽略")
+                                print(f"[Silero VAD] 聲音過短 ({len(full_audio)/SAMPLE_RATE:.2f}s)，判定為雜音已忽略")
 
                             audio_buffer = []
                             pre_roll_buffer.clear()
+                            vad_stream.reset()
                             is_speaking = False
                             silence_samples = 0
                             await websocket.send_json({"type": "status", "status": "ready"})
+                else:
+                    # 介於 neg_threshold 與 threshold 之間（微弱發音或過渡）
+                    if not is_speaking:
+                        pre_roll_buffer.append(chunk)
+                    else:
+                        audio_buffer.append(chunk)
+                        # 處於過渡地帶不重設也不增加靜音計數，避免微弱音被過早截斷
 
                 # 超過最大長度限制 -> 強制處理語音
                 if is_speaking and sum(len(c) for c in audio_buffer) >= max_buffer_samples:
@@ -272,6 +327,7 @@ async def websocket_stt_endpoint(websocket: WebSocket):
 
                     audio_buffer = []
                     pre_roll_buffer.clear()
+                    vad_stream.reset()
                     is_speaking = False
                     silence_samples = 0
                     await websocket.send_json({"type": "status", "status": "ready"})

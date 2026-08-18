@@ -16,10 +16,12 @@ services:
       - WHISPER_COMPUTE_TYPE=int8
       - WHISPER_DOWNLOAD_ROOT=/app/models
       - HF_HOME=/app/models
-      - SILENCE_THRESHOLD=0.045
+      - VAD_THRESHOLD=0.35
+      - VAD_NEG_THRESHOLD=0.20
+      - PRE_ROLL_CHUNKS=14
       - SILENCE_DURATION=0.8
-      - MIN_SPEECH_DURATION=0.5
-      - CONSECUTIVE_FRAMES=3
+      - MIN_SPEECH_DURATION=0.4
+      - CONSECUTIVE_FRAMES=1
       # Ollama 串接設定
       - ENABLE_LLM=true
       - LLM_THINK=false

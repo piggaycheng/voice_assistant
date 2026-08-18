@@ -13,11 +13,12 @@ app = FastAPI(title="Faster-Whisper STT WebSocket Server")
 model: WhisperModel = None
 
 SAMPLE_RATE = 16000
-SILENCE_THRESHOLD = float(os.getenv("SILENCE_THRESHOLD", "0.015"))  # 聲音能量 (RMS) 門檻
+SILENCE_THRESHOLD = float(os.getenv("SILENCE_THRESHOLD", "0.035"))  # 基礎聲音能量門檻 (預設提高至 0.035 避免雜音誤觸)
 SILENCE_DURATION_SEC = float(os.getenv("SILENCE_DURATION", "0.8"))  # 停頓多久視為說話結束 (秒)
-MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.3")) # 最小發話長度 (秒)
+MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.5")) # 最小發話長度 (小於此長度視為雜音忽略)
 MAX_BUFFER_SEC = 20.0  # 單次發話最大上限長度 (秒)
-PRE_ROLL_CHUNKS = 6    # 前置音訊緩衝 (約 300ms，避免吃掉發音開頭的輕聲/子音)
+PRE_ROLL_CHUNKS = 6    # 前置音訊緩衝 (約 300ms，保留開頭發音)
+CONSECUTIVE_FRAMES_TRIGGER = int(os.getenv("CONSECUTIVE_FRAMES", "3")) # 需連續 3 幀 (150ms) 達標才觸發，過濾敲鍵盤/點滑鼠等瞬間雜音
 
 @app.on_event("startup")
 def load_whisper_model():
@@ -58,7 +59,10 @@ async def websocket_stt_endpoint(websocket: WebSocket):
     audio_buffer = []
     pre_roll_buffer = deque(maxlen=PRE_ROLL_CHUNKS)
     is_speaking = False
+    consecutive_voice_frames = 0
     silence_samples = 0
+    noise_floor = 0.01  # 動態環境底噪估計值
+
     silence_samples_limit = int(SAMPLE_RATE * SILENCE_DURATION_SEC)
     min_speech_samples = int(SAMPLE_RATE * MIN_SPEECH_DURATION_SEC)
     max_buffer_samples = int(SAMPLE_RATE * MAX_BUFFER_SEC)
@@ -74,34 +78,48 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 if chunk_samples == 0:
                     continue
 
-                # 計算能量 RMS
-                rms = np.sqrt(np.mean(chunk**2))
+                # 計算當前 chunk 的 RMS 能量
+                rms = float(np.sqrt(np.mean(chunk**2)))
 
-                if rms > SILENCE_THRESHOLD:
-                    if not is_speaking:
-                        is_speaking = True
-                        print("[VAD] 偵測到使用者開始說話...")
-                        await websocket.send_json({"type": "status", "status": "listening"})
-                        # 將偵測到說話前 300ms 的音訊補入開頭，避免吃字
-                        audio_buffer.extend(list(pre_roll_buffer))
+                # 動態調整環境底噪（未說話時平滑更新）
+                if not is_speaking:
+                    noise_floor = 0.95 * noise_floor + 0.05 * rms
+
+                # 動態發話門檻：取固定門檻與環境底噪加成之最大值
+                active_threshold = max(SILENCE_THRESHOLD, noise_floor * 2.2)
+
+                if rms > active_threshold:
+                    consecutive_voice_frames += 1
                     
-                    audio_buffer.append(chunk)
-                    silence_samples = 0
-                else:
                     if not is_speaking:
-                        # 未說話時，維護前置環狀緩衝區
+                        # 需連續 N 幀超過門檻才視為真正開始說話（過濾短暫爆音、鍵盤聲）
+                        if consecutive_voice_frames >= CONSECUTIVE_FRAMES_TRIGGER:
+                            is_speaking = True
+                            print(f"[VAD] 偵測到人聲 (RMS={rms:.4f}, 底噪={noise_floor:.4f})，開始錄音...")
+                            await websocket.send_json({"type": "status", "status": "listening"})
+                            audio_buffer.extend(list(pre_roll_buffer))
+                            audio_buffer.append(chunk)
+                        else:
+                            pre_roll_buffer.append(chunk)
+                    else:
+                        audio_buffer.append(chunk)
+                        silence_samples = 0
+                else:
+                    consecutive_voice_frames = 0
+                    
+                    if not is_speaking:
                         pre_roll_buffer.append(chunk)
                     else:
-                        # 正在說話但遇到短暫停頓
                         audio_buffer.append(chunk)
                         silence_samples += chunk_samples
 
-                        # 靜音超過設定秒數，判定為一句話結束，進行辨識
+                        # 靜音超過設定秒數，判定一句話結束
                         if silence_samples >= silence_samples_limit:
                             full_audio = np.concatenate(audio_buffer)
                             
+                            # 若說話時間太短（如 < 0.5s），視為誤觸雜音直接忽略
                             if len(full_audio) >= min_speech_samples:
-                                # 音量正規化 (避免聲音過小辨識失真)
+                                # 音量正規化
                                 max_val = np.max(np.abs(full_audio))
                                 if max_val > 0.01:
                                     full_audio = full_audio / max_val * 0.95
@@ -126,7 +144,7 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                                 text = "".join([s.text for s in segments]).strip()
 
                                 if text:
-                                    print(f"[STT 結果] {text} (語言: {info.language}, 耗時音訊: {len(full_audio)/SAMPLE_RATE:.2f}s)")
+                                    print(f"[STT 結果] {text} (語言: {info.language}, 音訊長度: {len(full_audio)/SAMPLE_RATE:.2f}s)")
                                     await websocket.send_json({
                                         "type": "result",
                                         "text": text,
@@ -134,8 +152,10 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                                         "duration": round(len(full_audio) / SAMPLE_RATE, 2)
                                     })
                                 else:
-                                    print("[STT] 無法辨識出文字")
+                                    print("[STT] 未辨識出有效文字")
                                     await websocket.send_json({"type": "status", "status": "empty"})
+                            else:
+                                print(f"[VAD] 聲音長度過短 ({len(full_audio)/SAMPLE_RATE:.2f}s)，判定為雜音已忽略")
 
                             # 重置狀態
                             audio_buffer = []

@@ -1,0 +1,18 @@
+services:
+  stt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voice-assistant-stt
+    volumes:
+      # 將 host 當前目錄 (src/stt) mount 到容器內 /app（包含 .venv、models 與程式碼）
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - WHISPER_MODEL=tiny
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=int8
+      - WHISPER_DOWNLOAD_ROOT=/app/models
+      - HF_HOME=/app/models
+    stdin_open: true
+    tty: true

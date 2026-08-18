@@ -1,0 +1,11 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Model Weights & Cache
+models/
+.cache/
+*.log

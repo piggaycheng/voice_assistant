@@ -20,5 +20,13 @@ services:
       - SILENCE_DURATION=0.8
       - MIN_SPEECH_DURATION=0.5
       - CONSECUTIVE_FRAMES=3
+      # Ollama 串接設定
+      - ENABLE_LLM=true
+      - LLM_THINK=false
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=qwen3.5:4b
+      - LLM_SYSTEM_PROMPT=你是一個親切的繁體中文語音助理，回答請簡明扼要，使用口語自然流暢的口吻。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     stdin_open: true
     tty: true

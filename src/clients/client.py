@@ -46,16 +46,33 @@ async def audio_stream_client():
                             if msg_type == "status":
                                 status = res.get("status")
                                 if status == "listening":
-                                    print("🔴 [正在說話...]", end="\r", flush=True)
+                                    print("🔴 [正在說話...]          ", end="\r", flush=True)
                                 elif status == "transcribing":
-                                    print("⏳ [辨識中...]    ", end="\r", flush=True)
+                                    print("⏳ [語音辨識中...]        ", end="\r", flush=True)
+                                elif status == "empty":
+                                    print("⚠️  [未辨識出文字，請靠近麥克風再說一次]   ", end="\r", flush=True)
                                 elif status == "ready":
-                                    print("🟢 [準備就緒，請說話...]", end="\r", flush=True)
+                                    print("🟢 [準備就緒，請說話...]  ", end="\r", flush=True)
 
                             elif msg_type == "result":
                                 text = res.get("text", "")
                                 duration = res.get("duration", 0)
-                                print(f"\n🗣️  [辨識結果 ({duration}s)]: {text}\n")
+                                print(f"\n🗣️  [你說 ({duration}s)]: {text}")
+
+                            elif msg_type == "llm_start":
+                                print("🤖 [AI 回覆]: ", end="", flush=True)
+
+                            elif msg_type == "llm_chunk":
+                                chunk = res.get("chunk", "")
+                                print(chunk, end="", flush=True)
+
+                            elif msg_type == "llm_end":
+                                print("\n")
+                                print("🟢 [準備就緒，請說話...]", end="\r", flush=True)
+
+                            elif msg_type == "llm_error":
+                                err = res.get("error", "")
+                                print(f"\n❌ [AI 回應異常]: {err}\n")
                                 print("🟢 [準備就緒，請說話...]", end="\r", flush=True)
 
                         except Exception as e:

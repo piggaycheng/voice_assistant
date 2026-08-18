@@ -11,8 +11,6 @@ services:
     environment:
       - OLLAMA_KEEP_ALIVE=24h
       - OLLAMA_HOST=0.0.0.0
-    # 容器啟動後自動預載 qwen3.5:4b 模型進顯存
-    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 3; ollama run qwen3.5:4b ''; wait"]
     # 若具備 NVIDIA GPU 並已安裝 nvidia-container-toolkit，可啟用 GPU 加速：
     deploy:
       resources:

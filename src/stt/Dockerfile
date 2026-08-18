@@ -28,4 +28,4 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # 預設執行指令
-CMD ["python3", "main.py"]
+CMD ["python3", "scripts/main.py"]

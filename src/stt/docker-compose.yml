@@ -23,6 +23,7 @@ services:
       # Ollama 串接設定
       - ENABLE_LLM=true
       - LLM_THINK=false
+      - LLM_TEMPERATURE=0.3
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=qwen3.5:4b
       - LLM_SYSTEM_PROMPT=你是一個親切的繁體中文語音助理，回答請簡明扼要，使用口語自然流暢的口吻。

@@ -24,6 +24,7 @@ CONSECUTIVE_FRAMES_TRIGGER = int(os.getenv("CONSECUTIVE_FRAMES", "3")) # 需連�
 # Ollama 串接設定
 ENABLE_LLM = os.getenv("ENABLE_LLM", "true").lower() in ("true", "1", "yes")
 LLM_THINK = os.getenv("LLM_THINK", "false").lower() in ("true", "1", "yes")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
 LLM_SYSTEM_PROMPT = os.getenv(
@@ -50,6 +51,7 @@ def load_whisper_model():
         print(f" - Ollama 位址: {OLLAMA_BASE_URL}")
         print(f" - Ollama 模型: {OLLAMA_MODEL}")
         print(f" - 思考模式 (Think): {'開啟' if LLM_THINK else '關閉 (No Think 模式，極速秒回)'}")
+        print(f" - 溫度係數 (Temperature): {LLM_TEMPERATURE}")
     print("=" * 50)
 
     model = WhisperModel(
@@ -67,6 +69,7 @@ def index():
         "service": "faster-whisper-stt-websocket",
         "llm_enabled": ENABLE_LLM,
         "llm_think": LLM_THINK,
+        "llm_temperature": LLM_TEMPERATURE,
         "llm_model": OLLAMA_MODEL
     }
 
@@ -82,6 +85,9 @@ async def stream_ollama_chat(websocket: WebSocket, history: list, user_text: str
         "model": OLLAMA_MODEL,
         "messages": messages,
         "think": LLM_THINK,
+        "options": {
+            "temperature": LLM_TEMPERATURE
+        },
         "stream": True
     }
 

@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+from collections import deque
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from faster_whisper import WhisperModel
@@ -12,15 +13,16 @@ app = FastAPI(title="Faster-Whisper STT WebSocket Server")
 model: WhisperModel = None
 
 SAMPLE_RATE = 16000
-SILENCE_THRESHOLD = float(os.getenv("SILENCE_THRESHOLD", "0.02"))  # 聲音能量 (RMS) 門檻
-SILENCE_DURATION_SEC = float(os.getenv("SILENCE_DURATION", "0.7"))  # 停頓多久視為說話結束 (秒)
-MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.4")) # 最小發話長度 (秒)
+SILENCE_THRESHOLD = float(os.getenv("SILENCE_THRESHOLD", "0.015"))  # 聲音能量 (RMS) 門檻
+SILENCE_DURATION_SEC = float(os.getenv("SILENCE_DURATION", "0.8"))  # 停頓多久視為說話結束 (秒)
+MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.3")) # 最小發話長度 (秒)
 MAX_BUFFER_SEC = 20.0  # 單次發話最大上限長度 (秒)
+PRE_ROLL_CHUNKS = 6    # 前置音訊緩衝 (約 300ms，避免吃掉發音開頭的輕聲/子音)
 
 @app.on_event("startup")
 def load_whisper_model():
     global model
-    model_size = os.getenv("WHISPER_MODEL", "tiny")
+    model_size = os.getenv("WHISPER_MODEL", "small")
     device = os.getenv("WHISPER_DEVICE", "cpu")
     compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
     download_root = os.getenv("WHISPER_DOWNLOAD_ROOT", "/app/models")
@@ -54,6 +56,7 @@ async def websocket_stt_endpoint(websocket: WebSocket):
     print(f"[WebSocket] 客戶端連線成功: {client_info}")
 
     audio_buffer = []
+    pre_roll_buffer = deque(maxlen=PRE_ROLL_CHUNKS)
     is_speaking = False
     silence_samples = 0
     silence_samples_limit = int(SAMPLE_RATE * SILENCE_DURATION_SEC)
@@ -64,10 +67,8 @@ async def websocket_stt_endpoint(websocket: WebSocket):
         while True:
             message = await websocket.receive()
             
-            # 處理音訊二進位資料 (PCM 16-bit 16kHz Mono)
             if "bytes" in message and message["bytes"]:
                 data = message["bytes"]
-                # 轉為 float32 正規化音訊資料 (-1.0 ~ 1.0)
                 chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                 chunk_samples = len(chunk)
                 if chunk_samples == 0:
@@ -77,17 +78,21 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 rms = np.sqrt(np.mean(chunk**2))
 
                 if rms > SILENCE_THRESHOLD:
-                    # 偵測到人聲
                     if not is_speaking:
                         is_speaking = True
                         print("[VAD] 偵測到使用者開始說話...")
                         await websocket.send_json({"type": "status", "status": "listening"})
+                        # 將偵測到說話前 300ms 的音訊補入開頭，避免吃字
+                        audio_buffer.extend(list(pre_roll_buffer))
                     
                     audio_buffer.append(chunk)
                     silence_samples = 0
                 else:
-                    # 靜音區間
-                    if is_speaking:
+                    if not is_speaking:
+                        # 未說話時，維護前置環狀緩衝區
+                        pre_roll_buffer.append(chunk)
+                    else:
+                        # 正在說話但遇到短暫停頓
                         audio_buffer.append(chunk)
                         silence_samples += chunk_samples
 
@@ -96,19 +101,26 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                             full_audio = np.concatenate(audio_buffer)
                             
                             if len(full_audio) >= min_speech_samples:
+                                # 音量正規化 (避免聲音過小辨識失真)
+                                max_val = np.max(np.abs(full_audio))
+                                if max_val > 0.01:
+                                    full_audio = full_audio / max_val * 0.95
+
                                 print(f"[STT] 說話結束，開始辨識 ({len(full_audio)/SAMPLE_RATE:.2f} 秒音訊)...")
                                 await websocket.send_json({"type": "status", "status": "transcribing"})
 
-                                # 在背景 thread 執行 CPU 密集運算，避免阻塞 async event loop
                                 loop = asyncio.get_event_loop()
                                 segments, info = await loop.run_in_executor(
                                     None,
                                     lambda: model.transcribe(
                                         full_audio,
                                         beam_size=5,
+                                        temperature=0.0,
+                                        condition_on_previous_text=False,
                                         language="zh",
                                         initial_prompt="繁體中文，日常語音助理對話。",
-                                        vad_filter=True
+                                        vad_filter=True,
+                                        vad_parameters=dict(min_silence_duration_ms=500)
                                     )
                                 )
                                 text = "".join([s.text for s in segments]).strip()
@@ -125,8 +137,9 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                                     print("[STT] 無法辨識出文字")
                                     await websocket.send_json({"type": "status", "status": "empty"})
 
-                            # 重置緩衝區與說話狀態
+                            # 重置狀態
                             audio_buffer = []
+                            pre_roll_buffer.clear()
                             is_speaking = False
                             silence_samples = 0
                             await websocket.send_json({"type": "status", "status": "ready"})
@@ -134,11 +147,23 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 # 若單次發話長度超過上限，強制辨識
                 if is_speaking and sum(len(c) for c in audio_buffer) >= max_buffer_samples:
                     full_audio = np.concatenate(audio_buffer)
+                    max_val = np.max(np.abs(full_audio))
+                    if max_val > 0.01:
+                        full_audio = full_audio / max_val * 0.95
+
                     print(f"[STT] 發話長度達到上限，強制辨識...")
                     loop = asyncio.get_event_loop()
                     segments, info = await loop.run_in_executor(
                         None,
-                        lambda: model.transcribe(full_audio, beam_size=5, language="zh", vad_filter=True)
+                        lambda: model.transcribe(
+                            full_audio,
+                            beam_size=5,
+                            temperature=0.0,
+                            condition_on_previous_text=False,
+                            language="zh",
+                            initial_prompt="繁體中文，日常語音助理對話。",
+                            vad_filter=True
+                        )
                     )
                     text = "".join([s.text for s in segments]).strip()
                     if text:
@@ -149,6 +174,7 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                             "duration": round(len(full_audio) / SAMPLE_RATE, 2)
                         })
                     audio_buffer = []
+                    pre_roll_buffer.clear()
                     is_speaking = False
                     silence_samples = 0
                     await websocket.send_json({"type": "status", "status": "ready"})

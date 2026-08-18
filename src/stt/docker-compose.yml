@@ -11,13 +11,13 @@ services:
       - .:/app
     environment:
       - PYTHONUNBUFFERED=1
-      - WHISPER_MODEL=tiny
+      - WHISPER_MODEL=small
       - WHISPER_DEVICE=cpu
       - WHISPER_COMPUTE_TYPE=int8
       - WHISPER_DOWNLOAD_ROOT=/app/models
       - HF_HOME=/app/models
-      - SILENCE_THRESHOLD=0.02
-      - SILENCE_DURATION=0.7
-      - MIN_SPEECH_DURATION=0.4
+      - SILENCE_THRESHOLD=0.015
+      - SILENCE_DURATION=0.8
+      - MIN_SPEECH_DURATION=0.3
     stdin_open: true
     tty: true

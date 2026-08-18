@@ -16,7 +16,7 @@ services:
       - WHISPER_COMPUTE_TYPE=int8
       - WHISPER_DOWNLOAD_ROOT=/app/models
       - HF_HOME=/app/models
-      - SILENCE_THRESHOLD=0.035
+      - SILENCE_THRESHOLD=0.045
       - SILENCE_DURATION=0.8
       - MIN_SPEECH_DURATION=0.5
       - CONSECUTIVE_FRAMES=3

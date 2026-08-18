@@ -124,9 +124,16 @@ async def stream_ollama_chat(websocket: WebSocket, history: list, user_text: str
 
 async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, history: list):
     """執行 STT 語音辨識並串接 LLM"""
-    max_val = np.max(np.abs(full_audio))
-    if max_val > 0.01:
-        full_audio = full_audio / max_val * 0.95
+    max_val = float(np.max(np.abs(full_audio)))
+    
+    # 若最大音量過小（小於 0.04），代表只是微弱背景底噪或呼吸，直接忽略避免放大雜音
+    if max_val < 0.04:
+        print(f"[STT 忽略] 音量過小 (Max RMS={max_val:.4f})，視為環境雜音")
+        await websocket.send_json({"type": "status", "status": "empty"})
+        return
+
+    # 音量適度正規化（避免爆音與過度放大）
+    full_audio = full_audio / max_val * 0.90
 
     audio_duration = round(len(full_audio) / SAMPLE_RATE, 2)
     print(f"[STT] 說話結束，開始辨識 ({audio_duration} 秒音訊)...")
@@ -141,11 +148,26 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
             temperature=0.0,
             condition_on_previous_text=False,
             language="zh",
-            initial_prompt="繁體中文，日常語音助理對話。",
-            vad_filter=False
+            initial_prompt="繁體中文日常語音對話。",
+            vad_filter=False,
+            no_speech_threshold=0.6,
+            log_prob_threshold=-1.0,
+            compression_ratio_threshold=2.4
         )
     )
-    text = "".join([s.text for s in segments]).strip()
+
+    valid_segments = []
+    for s in segments:
+        # 過濾高機率非人聲或低置信度片段（從源頭自動防範各類字幕與雜音幻覺）
+        if s.no_speech_prob > 0.6:
+            print(f"[STT 忽略] 判定為非人聲 (no_speech_prob={s.no_speech_prob:.2f}): '{s.text}'")
+            continue
+        if s.avg_logprob < -1.0:
+            print(f"[STT 忽略] 置信度過低 (avg_logprob={s.avg_logprob:.2f}): '{s.text}'")
+            continue
+        valid_segments.append(s.text.strip())
+
+    text = "".join(valid_segments).strip()
 
     if text:
         print(f"[STT 結果] {text} (語言: {info.language}, 音訊長度: {audio_duration}s)")
@@ -159,7 +181,7 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
         # 串接 Ollama 生成回答
         await stream_ollama_chat(websocket, history, text)
     else:
-        print("[STT] 未辨識出有效文字")
+        print("[STT] 未辨識出有效文字（已過濾雜音/幻覺）")
         await websocket.send_json({"type": "status", "status": "empty"})
 
 @app.websocket("/ws")

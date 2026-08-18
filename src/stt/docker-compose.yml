@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: voice-assistant-stt
+    ports:
+      - "8000:8000"
     volumes:
       # 將 host 當前目錄 (src/stt) mount 到容器內 /app（包含 .venv、models 與程式碼）
       - .:/app
@@ -14,5 +16,8 @@ services:
       - WHISPER_COMPUTE_TYPE=int8
       - WHISPER_DOWNLOAD_ROOT=/app/models
       - HF_HOME=/app/models
+      - SILENCE_THRESHOLD=0.02
+      - SILENCE_DURATION=0.7
+      - MIN_SPEECH_DURATION=0.4
     stdin_open: true
     tty: true

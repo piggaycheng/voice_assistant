@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: voice-assistant-stt
     ports:
-      - "8000:8000"
+      - "8002:8000"
     volumes:
       # 將 host 當前目錄 (src/stt) mount 到容器內 /app（包含 .venv、models 與程式碼）
       - .:/app

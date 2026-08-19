@@ -10,7 +10,7 @@ import httpx
 import websockets
 
 # 連線與音訊參數
-SERVER_URI = os.getenv("STT_SERVER_URI", "ws://localhost:8000/ws")
+SERVER_URI = os.getenv("STT_SERVER_URI", "ws://localhost:8002/ws")
 TTS_URL = os.getenv("TTS_SERVER_URL", "http://localhost:8001/tts")
 ENABLE_TTS = os.getenv("ENABLE_TTS", "true").lower() in ("true", "1", "yes")
 TTS_VOICE = os.getenv("TTS_VOICE", "zf_xiaoxiao")
@@ -19,6 +19,46 @@ TTS_SPEED = float(os.getenv("TTS_SPEED", "1.0"))
 SAMPLE_RATE = 16000
 CHANNELS = 1
 CHUNK_SIZE = 800  # 800 samples @ 16000Hz = 50ms 一包
+
+def resolve_audio_device(device_setting: str, kind: str = "input"):
+    """
+    解析指定音訊設備 ID 或名稱，預設指名使用 PipeWire (若無則依序嘗試 pulse / default)。
+    kind: 'input' 或 'output'
+    """
+    if device_setting is not None and str(device_setting).strip().isdigit():
+        return int(device_setting)
+
+    target = (device_setting or "pipewire").strip().lower()
+    search_list = [target]
+    # 若指名 pipewire 但找不到，提供相容回退
+    if target == "pipewire":
+        search_list.extend(["pulse", "default"])
+
+    try:
+        devices = sd.query_devices()
+        ch_key = "max_input_channels" if kind == "input" else "max_output_channels"
+        for candidate in search_list:
+            for idx, dev in enumerate(devices):
+                if dev.get(ch_key, 0) > 0 and candidate in dev.get("name", "").lower():
+                    return idx
+    except Exception as e:
+        print(f"⚠️ [音訊設備查詢警告] {e}", file=sys.stderr)
+
+    return None
+
+def get_device_label(device_id, kind: str = "input") -> str:
+    """取得設備顯示名稱"""
+    if device_id is None:
+        return "系統預設 (Default)"
+    try:
+        dev = sd.query_devices(device_id)
+        return f"[ID: {device_id}] {dev.get('name', 'Unknown')}"
+    except Exception:
+        return f"[ID: {device_id}]"
+
+# 設定指名使用 PipeWire
+INPUT_DEVICE_ID = resolve_audio_device(os.getenv("AUDIO_INPUT_DEVICE", "pipewire"), kind="input")
+OUTPUT_DEVICE_ID = resolve_audio_device(os.getenv("AUDIO_OUTPUT_DEVICE", "pipewire"), kind="output")
 
 # 控制播放狀態（播放時靜音麥克風，避免助理聽到自己講話形成迴音）
 is_playing_audio = False
@@ -52,8 +92,8 @@ async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
         is_playing_audio = True
         print(f"🔊 [AI 語音播放中 ({len(audio_data)/sample_rate:.1f}s)...]          ", end="\r", flush=True)
 
-        # 播放音訊並等待播放完成
-        sd.play(audio_data, sample_rate)
+        # 播放音訊並等待播放完成（指定 Output Device）
+        sd.play(audio_data, sample_rate, device=OUTPUT_DEVICE_ID)
         await loop.run_in_executor(None, sd.wait)
 
     except httpx.ConnectError:
@@ -87,6 +127,8 @@ async def audio_stream_client():
     print(f" 🔗 STT 伺服器: {SERVER_URI}")
     print(f" 🔊 TTS 伺服器: {TTS_URL} (語音: {TTS_VOICE}, 語速: {TTS_SPEED})")
     print(f" ⚙️  TTS 語音播放: {'開啟' if ENABLE_TTS else '關閉'}")
+    print(f" 🎤 麥克風 (Input):  {get_device_label(INPUT_DEVICE_ID, kind='input')}")
+    print(f" 🔈 喇叭 (Output):   {get_device_label(OUTPUT_DEVICE_ID, kind='output')}")
     print("=" * 65)
 
     while True:
@@ -147,8 +189,9 @@ async def audio_stream_client():
                         except Exception as e:
                             print(f"\n[解析回應錯誤] {e}")
 
-                # 啟動麥克風錄音串流
+                # 啟動麥克風錄音串流 (指名 Input Device)
                 with sd.InputStream(
+                    device=INPUT_DEVICE_ID,
                     samplerate=SAMPLE_RATE,
                     channels=CHANNELS,
                     dtype="int16",

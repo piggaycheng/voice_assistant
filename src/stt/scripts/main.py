@@ -24,6 +24,18 @@ MAX_BUFFER_SEC = 20.0  # 單次發話最大上限長度 (秒)
 PRE_ROLL_CHUNKS = int(os.getenv("PRE_ROLL_CHUNKS", "14")) # 前置音訊緩衝 (14 chunks = 700ms，完整保留開頭發音與自然聲學上下文)
 CONSECUTIVE_FRAMES_TRIGGER = int(os.getenv("CONSECUTIVE_FRAMES", "1")) # 1 幀達標即觸發錄音，零延遲響應
 
+WHISPER_INITIAL_PROMPT = "繁體中文日常語音對話。公司名稱：盟立、盟立自動化、盟立集團、MiRLE。"
+COMPANY_ALIASES = {
+    "夢立": "盟立",
+    "猛力": "盟立",
+    "盟力": "盟立",
+}
+
+def normalize_company_aliases(text: str) -> str:
+    for alias, canonical_name in COMPANY_ALIASES.items():
+        text = text.replace(alias, canonical_name)
+    return text
+
 class SileroVADStream:
     """即時串流 Silero VAD (基於 ONNX)，維持每個連線獨立的 hidden state 與 context"""
     def __init__(self, session):
@@ -204,7 +216,7 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
             temperature=0.0,
             condition_on_previous_text=False,
             language="zh",
-            initial_prompt="繁體中文日常語音對話。",
+            initial_prompt=WHISPER_INITIAL_PROMPT,
             vad_filter=False,
             no_speech_threshold=0.6,
             log_prob_threshold=-1.0,
@@ -223,9 +235,12 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
             continue
         valid_segments.append(s.text.strip())
 
-    text = "".join(valid_segments).strip()
+    raw_text = "".join(valid_segments).strip()
+    text = normalize_company_aliases(raw_text)
 
     if text:
+        if text != raw_text:
+            print(f"[STT 名稱修正] {raw_text} -> {text}")
         print(f"[STT 結果] {text} (語言: {info.language}, 音訊長度: {audio_duration}s)")
         await websocket.send_json({
             "type": "result",

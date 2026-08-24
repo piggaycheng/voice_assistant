@@ -11,6 +11,9 @@ __pycache__/
 src/openharness/config/*
 !src/openharness/config/.gitkeep
 
+# hermes-agent data
+mirle_official_wiki/
+
 # Model Weights & Cache
 models/
 .cache/

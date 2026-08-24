@@ -11,6 +11,7 @@ services:
       - hermes_data:/opt/data
       - ./config.yaml:/opt/hermes-config.yaml:ro
       - ./init-config.sh:/opt/hermes-init.sh:ro
+      - ./wiki_data:/wiki_data:ro
     environment:
       - HERMES_UID=${HERMES_UID:-1000}
       - HERMES_GID=${HERMES_GID:-1000}

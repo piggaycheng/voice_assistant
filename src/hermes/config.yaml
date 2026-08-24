@@ -11,6 +11,10 @@ agent:
   max_turns: 10
   reasoning_effort: "medium"
 
+auxiliary:
+  title_generation:
+    enabled: false
+
 tool_loop_guardrails:
   hard_stop_enabled: true
 

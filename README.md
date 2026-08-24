@@ -15,11 +15,19 @@
 
 ## 1. 啟動後端服務
 
+首次啟動先建立 Hermes 與 STT 共用的 API key 設定：
+
 ```bash
-# 啟動全部 Docker 容器 (LLM / TTS / STT)
+cp src/hermes/.env.example src/hermes/.env
+# 編輯 src/hermes/.env，將 HERMES_API_KEY 換成至少 16 字元的長隨機字串
+```
+
+```bash
+# 啟動全部 Docker 容器 (LLM / Hermes / TTS / STT)
 docker compose -f src/llm/docker-compose.yml up -d && \
+docker compose --env-file src/hermes/.env -f src/hermes/docker-compose.yml up -d && \
 docker compose -f src/tts/docker-compose.yml up -d && \
-docker compose -f src/stt/docker-compose.yml up -d
+docker compose --env-file src/hermes/.env -f src/stt/docker-compose.yml up -d
 
 # (首次使用) 下載預設 LLM 模型
 docker exec -it voice-assistant-llm ollama pull qwen3.5:4b
@@ -55,11 +63,11 @@ Bridge 程式、`.venv` 與 OpenHarness 設定皆由 `src/openharness` 掛載進
 
 ### Hermes Agent
 
-Hermes 使用官方 `nousresearch/hermes-agent:latest` image，並直接提供 OpenAI 相容 API，不需要額外 Bridge。先建立本機 API key 設定：
+Hermes 使用官方 `nousresearch/hermes-agent:latest` image，並直接提供 OpenAI 相容 API，不需要額外 Bridge。若尚未建立本機 API key 設定：
 
 ```bash
 cp src/hermes/.env.example src/hermes/.env
-# 編輯 src/hermes/.env，將 HERMES_API_KEY 換成長隨機字串
+# 編輯 src/hermes/.env，將 HERMES_API_KEY 換成至少 16 字元的長隨機字串
 docker compose --env-file src/hermes/.env -f src/hermes/docker-compose.yml up -d
 ```
 
@@ -85,6 +93,8 @@ curl http://localhost:8642/v1/chat/completions \
 ```
 
 `src/llm/docker-compose.yml` 將 Ollama context 設為 `65536`，並與 `src/hermes/config.yaml` 的 `model.context_length` 保持一致，以符合 Hermes 最低 `64000` 的要求。首次啟動會將此模板複製到被 Git 忽略的 `src/hermes/data/config.yaml`；既有執行期設定不會被覆蓋。Hermes API 可執行終端與檔案工具，請勿將 `8642` 暴露到不受信任的網路。
+
+STT 會將辨識文字送至 Hermes 的 `/v1/chat/completions`，並把 Hermes 的串流回答轉送給 Client/TTS。啟動 STT 時必須透過 `--env-file src/hermes/.env` 傳入相同的 `HERMES_API_KEY`。
 
 ---
 

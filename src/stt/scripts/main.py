@@ -9,7 +9,7 @@ from faster_whisper import WhisperModel
 from faster_whisper.vad import get_vad_model
 import uvicorn
 
-app = FastAPI(title="Faster-Whisper STT & Ollama Voice Assistant Server")
+app = FastAPI(title="Faster-Whisper STT & Hermes Voice Assistant Server")
 
 # 全域模型實例
 model: WhisperModel = None
@@ -62,12 +62,12 @@ class SileroVADStream:
         self.remainder = audio
         return probs
 
-# Ollama 串接設定
+# Hermes Agent 串接設定
 ENABLE_LLM = os.getenv("ENABLE_LLM", "true").lower() in ("true", "1", "yes")
-LLM_THINK = os.getenv("LLM_THINK", "false").lower() in ("true", "1", "yes")
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
+HERMES_BASE_URL = os.getenv("HERMES_BASE_URL", "http://host.docker.internal:8642")
+HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
+HERMES_MODEL = os.getenv("HERMES_MODEL", "hermes-agent")
+HERMES_TIMEOUT = float(os.getenv("HERMES_TIMEOUT", "180"))
 LLM_SYSTEM_PROMPT = os.getenv(
     "LLM_SYSTEM_PROMPT",
     "你是一個親切的繁體中文語音助理，回答請簡明扼要，使用口語自然流暢的口吻。"
@@ -90,10 +90,10 @@ def load_whisper_model():
     print(f" - Silero VAD 門檻: 人聲={VAD_THRESHOLD}, 靜音={VAD_NEG_THRESHOLD}")
     print(f" - LLM 串接: {'開啟' if ENABLE_LLM else '關閉'}")
     if ENABLE_LLM:
-        print(f" - Ollama 位址: {OLLAMA_BASE_URL}")
-        print(f" - Ollama 模型: {OLLAMA_MODEL}")
-        print(f" - 思考模式 (Think): {'開啟' if LLM_THINK else '關閉 (No Think 模式，極速秒回)'}")
-        print(f" - 溫度係數 (Temperature): {LLM_TEMPERATURE}")
+        if len(HERMES_API_KEY) < 16:
+            raise RuntimeError("ENABLE_LLM=true 時，HERMES_API_KEY 必須至少 16 個字元")
+        print(f" - Hermes 位址: {HERMES_BASE_URL}")
+        print(f" - Hermes 模型: {HERMES_MODEL}")
     print("=" * 50)
 
     # 載入 Silero VAD (ONNX)
@@ -115,13 +115,12 @@ def index():
         "status": "running",
         "service": "faster-whisper-stt-websocket",
         "llm_enabled": ENABLE_LLM,
-        "llm_think": LLM_THINK,
-        "llm_temperature": LLM_TEMPERATURE,
-        "llm_model": OLLAMA_MODEL
+        "llm_backend": "hermes",
+        "llm_model": HERMES_MODEL
     }
 
-async def stream_ollama_chat(websocket: WebSocket, history: list, user_text: str):
-    """將使用者文字送往 Ollama 並串流回傳回答"""
+async def stream_hermes_chat(websocket: WebSocket, history: list, user_text: str):
+    """將使用者文字送往 Hermes Agent 並串流回傳回答"""
     if not ENABLE_LLM:
         return
 
@@ -129,41 +128,45 @@ async def stream_ollama_chat(websocket: WebSocket, history: list, user_text: str
     messages = [{"role": "system", "content": LLM_SYSTEM_PROMPT}] + list(history)[-8:]
 
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": HERMES_MODEL,
         "messages": messages,
-        "think": LLM_THINK,
-        "options": {
-            "temperature": LLM_TEMPERATURE
-        },
         "stream": True
     }
+    headers = {"Authorization": f"Bearer {HERMES_API_KEY}"}
 
-    print(f"[LLM] 正在請求 {OLLAMA_MODEL} 生成回覆...")
+    print(f"[LLM] 正在請求 Hermes Agent ({HERMES_MODEL}) 生成回覆...")
     await websocket.send_json({"type": "llm_start"})
     full_response = []
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async with client.stream("POST", f"{OLLAMA_BASE_URL}/api/chat", json=payload) as response:
+        async with httpx.AsyncClient(timeout=HERMES_TIMEOUT) as client:
+            async with client.stream(
+                "POST",
+                f"{HERMES_BASE_URL.rstrip('/')}/v1/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as response:
                 if response.status_code != 200:
-                    err_msg = f"Ollama 回應狀態碼異常: {response.status_code}"
+                    err_msg = f"Hermes 回應狀態碼異常: {response.status_code}"
                     print(f"[LLM 錯誤] {err_msg}")
                     await websocket.send_json({"type": "llm_error", "error": err_msg})
                     return
 
                 async for line in response.aiter_lines():
-                    if not line:
+                    if not line.startswith("data:"):
                         continue
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
                     try:
-                        chunk_data = json.loads(line)
-                        msg_chunk = chunk_data.get("message", {}).get("content", "")
+                        chunk_data = json.loads(data)
+                        choices = chunk_data.get("choices", [])
+                        msg_chunk = choices[0].get("delta", {}).get("content", "") if choices else ""
                         if msg_chunk:
                             full_response.append(msg_chunk)
                             await websocket.send_json({"type": "llm_chunk", "chunk": msg_chunk})
-                        if chunk_data.get("done", False):
-                            break
-                    except Exception:
-                        pass
+                    except (json.JSONDecodeError, AttributeError, IndexError):
+                        continue
 
         complete_reply = "".join(full_response).strip()
         if complete_reply:
@@ -232,7 +235,7 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
         })
 
         # 串接 Ollama 生成回答
-        await stream_ollama_chat(websocket, history, text)
+        await stream_hermes_chat(websocket, history, text)
     else:
         print("[STT] 未辨識出有效文字（已過濾雜音/幻覺）")
         await websocket.send_json({"type": "status", "status": "empty"})

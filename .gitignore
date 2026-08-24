@@ -12,7 +12,6 @@ src/openharness/config/*
 !src/openharness/config/.gitkeep
 
 # Hermes data
-src/hermes/data/*
 src/hermes/.env
 
 # Model Weights & Cache

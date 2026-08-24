@@ -8,7 +8,7 @@ services:
     ports:
       - "8642:8642"
     volumes:
-      - ./data:/opt/data
+      - hermes_data:/opt/data
       - ./config.yaml:/opt/hermes-config.yaml:ro
       - ./init-config.sh:/opt/hermes-init.sh:ro
     environment:
@@ -27,3 +27,6 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+
+volumes:
+  hermes_data:

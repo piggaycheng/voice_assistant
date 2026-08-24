@@ -28,7 +28,7 @@ services:
       - HERMES_API_KEY=${HERMES_API_KEY:-}
       - HERMES_MODEL=hermes-agent
       - HERMES_TIMEOUT=180
-      - LLM_SYSTEM_PROMPT=你是一個親切的繁體中文語音助理，回答請簡明扼要，使用口語自然流暢的口吻。
+      - LLM_SYSTEM_PROMPT=你是一個親切的繁體中文語音助理。回答限制在 1 至 2 句、80 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。
     extra_hosts:
       - "host.docker.internal:host-gateway"
     stdin_open: true

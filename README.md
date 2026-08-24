@@ -96,6 +96,29 @@ curl http://localhost:8642/v1/chat/completions \
 
 #### 切換 Hermes 預設模型
 
+若要從自訂 Modelfile 建立模型，先將檔案放在 `src/llm/modelfiles/`。該目錄會以唯讀方式掛載至 Ollama 容器的 `/modelfiles`：
+
+```bash
+# 套用 /modelfiles 掛載
+docker compose -f src/llm/docker-compose.yml up -d --force-recreate
+
+# 建立模型；MODEL_NAME 不需要加 :latest
+docker exec voice-assistant-llm \
+	ollama create MODEL_NAME -f /modelfiles/FILE_NAME.Modelfile
+
+# 確認模型與實際 Modelfile 設定
+docker exec voice-assistant-llm ollama list
+docker exec voice-assistant-llm ollama show --modelfile MODEL_NAME
+```
+
+例如使用現有的 temperature `0.1` Modelfile 建立模型：
+
+```bash
+docker exec voice-assistant-llm \
+	ollama create qwen3.5-4b-temp-0.1 \
+	-f /modelfiles/qwen3.5-4b-temperature-0.1.Modelfile
+```
+
 先確認目標模型已存在於 Ollama：
 
 ```bash

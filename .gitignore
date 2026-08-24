@@ -7,6 +7,10 @@ env/
 __pycache__/
 *.py[cod]
 
+# OpenHarness provider settings and credentials
+src/openharness/config/*
+!src/openharness/config/.gitkeep
+
 # Model Weights & Cache
 models/
 .cache/

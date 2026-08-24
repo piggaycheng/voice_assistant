@@ -1,0 +1,34 @@
+services:
+  openharness:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voice-assistant-openharness
+    ports:
+      - "8010:8010"
+    volumes:
+      # 掛載程式碼、requirements.txt 與容器專用 .venv
+      - .:/app
+      # 持久化 OpenHarness provider、skill 與認證設定
+      - ./config:/root/.openharness
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OPENHARNESS_BRIDGE_HOST=0.0.0.0
+      - OPENHARNESS_BRIDGE_PORT=8010
+      - OPENHARNESS_BRIDGE_KEY=${OPENHARNESS_BRIDGE_KEY:-}
+      - OPENHARNESS_COMMAND=oh
+      - OPENHARNESS_PERMISSION_MODE=plan
+      - OPENHARNESS_MAX_TURNS=10
+      - OPENHARNESS_TIMEOUT=120
+      # 首次啟動時自動建立並啟用 Ollama provider
+      - OPENHARNESS_AUTO_CONFIGURE_OLLAMA=true
+      - OPENHARNESS_OLLAMA_PROFILE=ollama
+      - OPENHARNESS_OLLAMA_LABEL=Ollama
+      - OPENHARNESS_OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3.5:4b}
+      - OPENHARNESS_OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      # Ollama 不驗證金鑰，但 OpenHarness 的 OpenAI provider 需要非空值
+      - OPENHARNESS_OPENAI_API_KEY=ollama
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stdin_open: true
+    tty: true

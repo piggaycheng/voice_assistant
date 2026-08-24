@@ -11,6 +11,7 @@ services:
     environment:
       - OLLAMA_KEEP_ALIVE=24h
       - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_CONTEXT_LENGTH=65536
     # 若具備 NVIDIA GPU 並已安裝 nvidia-container-toolkit，可啟用 GPU 加速：
     deploy:
       resources:

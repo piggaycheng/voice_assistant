@@ -3,12 +3,14 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: voice-assistant-hermes
     restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/hermes-init.sh"]
     command: gateway run
     ports:
       - "8642:8642"
     volumes:
       - ./data:/opt/data
-      - ./config.yaml:/opt/data/config.yaml:ro
+      - ./config.yaml:/opt/hermes-config.yaml:ro
+      - ./init-config.sh:/opt/hermes-init.sh:ro
     environment:
       - HERMES_UID=${HERMES_UID:-1000}
       - HERMES_GID=${HERMES_GID:-1000}

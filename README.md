@@ -6,6 +6,7 @@
 
 - **LLM (Ollama)**: `11434`
 - **OpenHarness Bridge**: `8010`
+- **Hermes Agent API**: `8642`
 - **TTS (Kokoro-82M)**: `8001`
 - **STT (Faster-Whisper + VAD)**: `8000` (WebSocket: `ws://localhost:8000/ws`)
 - **Client**: 本地 Python 音訊客戶端（麥克風錄音 / 喇叭播放）
@@ -52,6 +53,39 @@ curl http://localhost:8010/query \
 
 Bridge 程式、`.venv` 與 OpenHarness 設定皆由 `src/openharness` 掛載進容器；provider 設定會保存在 `src/openharness/config`，且不會納入 Git。
 
+### Hermes Agent
+
+Hermes 使用官方 `nousresearch/hermes-agent:latest` image，並直接提供 OpenAI 相容 API，不需要額外 Bridge。先建立本機 API key 設定：
+
+```bash
+cp src/hermes/.env.example src/hermes/.env
+# 編輯 src/hermes/.env，將 HERMES_API_KEY 換成長隨機字串
+docker compose --env-file src/hermes/.env -f src/hermes/docker-compose.yml up -d
+```
+
+健康檢查與模型查詢：
+
+```bash
+curl http://localhost:8642/health
+
+set -a
+source src/hermes/.env
+set +a
+curl http://localhost:8642/v1/models \
+	-H "Authorization: Bearer ${HERMES_API_KEY}"
+```
+
+測試對話：
+
+```bash
+curl http://localhost:8642/v1/chat/completions \
+	-H "Authorization: Bearer ${HERMES_API_KEY}" \
+	-H "Content-Type: application/json" \
+	-d '{"model":"hermes-agent","messages":[{"role":"user","content":"只回答：HERMES-OK"}]}'
+```
+
+`src/llm/docker-compose.yml` 將 Ollama context 設為 `65536`，並與 `src/hermes/config.yaml` 的 `model.context_length` 保持一致，以符合 Hermes 最低 `64000` 的要求。首次啟動會將此模板複製到被 Git 忽略的 `src/hermes/data/config.yaml`；既有執行期設定不會被覆蓋。Hermes API 可執行終端與檔案工具，請勿將 `8642` 暴露到不受信任的網路。
+
 ---
 
 ## 2. 啟動語音客戶端
@@ -80,11 +114,13 @@ docker ps --filter "name=voice-assistant"
 docker logs -f voice-assistant-stt   # STT 日誌
 docker logs -f voice-assistant-tts   # TTS 日誌
 docker logs -f voice-assistant-llm   # LLM 日誌
+docker logs -f voice-assistant-hermes # Hermes 日誌
 ```
 
 ### 停止全部服務
 ```bash
 docker compose -f src/stt/docker-compose.yml down && \
 docker compose -f src/tts/docker-compose.yml down && \
-docker compose -f src/llm/docker-compose.yml down
+docker compose -f src/llm/docker-compose.yml down && \
+docker compose --env-file src/hermes/.env -f src/hermes/docker-compose.yml down
 ```

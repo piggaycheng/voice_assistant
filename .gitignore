@@ -11,6 +11,10 @@ __pycache__/
 src/openharness/config/*
 !src/openharness/config/.gitkeep
 
+# Hermes data
+src/hermes/data/*
+!src/hermes/data/.gitkeep
+
 # Model Weights & Cache
 models/
 .cache/

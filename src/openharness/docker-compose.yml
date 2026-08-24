@@ -27,7 +27,7 @@ services:
       - OPENHARNESS_OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3.5:4b}
       - OPENHARNESS_OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       # Ollama 不驗證金鑰，但 OpenHarness 的 OpenAI provider 需要非空值
-      - OPENHARNESS_OPENAI_API_KEY=ollama
+      - OPENAI_API_KEY=ollama
     extra_hosts:
       - "host.docker.internal:host-gateway"
     stdin_open: true

@@ -15,6 +15,9 @@ TTS_URL = os.getenv("TTS_SERVER_URL", "http://localhost:8001/tts")
 ENABLE_TTS = os.getenv("ENABLE_TTS", "true").lower() in ("true", "1", "yes")
 TTS_VOICE = os.getenv("TTS_VOICE", "zf_xiaoxiao")
 TTS_SPEED = float(os.getenv("TTS_SPEED", "1.0"))
+TTS_MIN_SEGMENT_CHARS = int(os.getenv("TTS_MIN_SEGMENT_CHARS", "6"))
+TTS_MAX_SEGMENT_CHARS = int(os.getenv("TTS_MAX_SEGMENT_CHARS", "18"))
+TTS_SEGMENT_BOUNDARIES = frozenset("，,。！？!?；;：:\n")
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -65,7 +68,6 @@ is_playing_audio = False
 
 async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
     """向 TTS 伺服器請求語音並透過喇叭播放"""
-    global is_playing_audio
     if not ENABLE_TTS or not text.strip():
         return
 
@@ -88,8 +90,6 @@ async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
         # 解碼 WAV 音訊
         audio_data, sample_rate = sf.read(io.BytesIO(resp.content), dtype="float32")
 
-        # 設定播放中旗標（麥克風將暫停傳送人聲以防止回授）
-        is_playing_audio = True
         print(f"🔊 [AI 語音播放中 ({len(audio_data)/sample_rate:.1f}s)...]          ", end="\r", flush=True)
 
         # 播放音訊並等待播放完成（指定 Output Device）
@@ -100,15 +100,52 @@ async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
         print(f"\n⚠️  [TTS 連線失敗] 無法連線至 {TTS_URL}，請確認 TTS 容器是否已啟動。")
     except Exception as e:
         print(f"\n⚠️  [TTS 播放異常] {e}")
-    finally:
-        # 播放完畢，恢復麥克風接收
-        await asyncio.sleep(0.2)  # 額外留 200ms 緩衝清空尾音
-        is_playing_audio = False
-        print("🟢 [準備就緒，請說話...]               ", end="\r", flush=True)
+
+def extract_tts_segments(buffer: str, flush: bool = False) -> tuple[list[str], str]:
+    """從 LLM 串流文字中取出適合立即朗讀的完整短句。"""
+    segments = []
+    segment_start = 0
+
+    for index, character in enumerate(buffer):
+        candidate = buffer[segment_start:index + 1].strip()
+        reached_boundary = character in TTS_SEGMENT_BOUNDARIES and len(candidate) >= TTS_MIN_SEGMENT_CHARS
+        reached_max_length = len(candidate) >= TTS_MAX_SEGMENT_CHARS
+        if reached_boundary or reached_max_length:
+            segments.append(candidate)
+            segment_start = index + 1
+
+    remainder = buffer[segment_start:]
+    if flush and remainder.strip():
+        segments.append(remainder.strip())
+        remainder = ""
+    return segments, remainder
+
+async def tts_stream_worker(tts_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    """依序合成並播放短句，避免多段音訊互相重疊。"""
+    global is_playing_audio
+    response_active = False
+
+    while True:
+        event, text = await tts_queue.get()
+        try:
+            if event == "segment":
+                if not response_active:
+                    response_active = True
+                    is_playing_audio = True
+                await play_tts_audio(text, loop)
+            elif event == "end":
+                if response_active:
+                    await asyncio.sleep(0.2)
+                response_active = False
+                is_playing_audio = False
+                print("🟢 [準備就緒，請說話...]               ", end="\r", flush=True)
+        finally:
+            tts_queue.task_done()
 
 async def audio_stream_client():
     global is_playing_audio
     audio_queue = asyncio.Queue()
+    tts_queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
     def audio_callback(indata, frames, time, status):
@@ -144,6 +181,7 @@ async def audio_stream_client():
 
                 # 接收辨識結果 Task
                 async def receiver():
+                    tts_buffer = ""
                     async for message in ws:
                         try:
                             res = json.loads(message)
@@ -166,25 +204,39 @@ async def audio_stream_client():
                                 print(f"\n🗣️  [你說 ({duration}s)]: {text}")
 
                             elif msg_type == "llm_start":
+                                tts_buffer = ""
                                 print("🤖 [AI 回覆]: ", end="", flush=True)
 
                             elif msg_type == "llm_chunk":
                                 chunk = res.get("chunk", "")
                                 print(chunk, end="", flush=True)
+                                if ENABLE_TTS:
+                                    tts_buffer += chunk
+                                    segments, tts_buffer = extract_tts_segments(tts_buffer)
+                                    for segment in segments:
+                                        tts_queue.put_nowait(("segment", segment))
+                                    if segments:
+                                        await asyncio.sleep(0)
 
                             elif msg_type == "llm_end":
-                                full_reply = res.get("text", "")
                                 print("\n")
-                                # 觸發 Kokoro TTS 語音播放
-                                if ENABLE_TTS and full_reply:
-                                    await play_tts_audio(full_reply, loop)
+                                if ENABLE_TTS:
+                                    segments, tts_buffer = extract_tts_segments(tts_buffer, flush=True)
+                                    for segment in segments:
+                                        tts_queue.put_nowait(("segment", segment))
+                                    tts_queue.put_nowait(("end", ""))
+                                    await asyncio.sleep(0)
                                 else:
                                     print("🟢 [準備就緒，請說話...]", end="\r", flush=True)
 
                             elif msg_type == "llm_error":
                                 err = res.get("error", "")
                                 print(f"\n❌ [AI 回應異常]: {err}\n")
-                                print("🟢 [準備就緒，請說話...]", end="\r", flush=True)
+                                tts_buffer = ""
+                                if ENABLE_TTS:
+                                    await tts_queue.put(("end", ""))
+                                else:
+                                    print("🟢 [準備就緒，請說話...]", end="\r", flush=True)
 
                         except Exception as e:
                             print(f"\n[解析回應錯誤] {e}")
@@ -200,7 +252,8 @@ async def audio_stream_client():
                 ):
                     sender_task = asyncio.create_task(sender())
                     receiver_task = asyncio.create_task(receiver())
-                    await asyncio.gather(sender_task, receiver_task)
+                    tts_task = asyncio.create_task(tts_stream_worker(tts_queue, loop))
+                    await asyncio.gather(sender_task, receiver_task, tts_task)
 
         except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError):
             print(f"⚠️  無法連線至 {SERVER_URI}，5 秒後嘗試重連...")

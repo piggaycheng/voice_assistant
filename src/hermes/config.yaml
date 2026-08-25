@@ -8,6 +8,14 @@ model:
   context_length: 65536
   max_tokens: 8192
 
+custom_providers:
+  - name: "vllm-local"
+    base_url: "http://host.docker.internal:11434/v1"
+    api_key: "ollama"
+    model: "qwen3.5:4b"
+    extra_body:
+      temperature: 0.1
+
 agent:
   max_turns: 10
   reasoning_effort: "none"

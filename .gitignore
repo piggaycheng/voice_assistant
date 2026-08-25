@@ -16,6 +16,7 @@ mirle_official_wiki/
 
 # Model Weights & Cache
 models/
+src/llm/hg_models/
 .cache/
 *.log
 

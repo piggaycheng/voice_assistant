@@ -4,7 +4,7 @@
 
 ## 服務架構與端口
 
-- **LLM (Ollama)**: `11434`
+- **LLM (Ollama，另提供 llama.cpp / vLLM Compose)**: `11434`
 - **OpenHarness Bridge**: `8010`
 - **Hermes Agent API**: `8642`
 - **TTS (Kokoro-82M)**: `8001`
@@ -29,8 +29,6 @@ docker compose --env-file src/hermes/.env -f src/hermes/docker-compose.yml up -d
 docker compose -f src/tts/docker-compose.yml up -d && \
 docker compose --env-file src/hermes/.env -f src/stt/docker-compose.yml up -d
 
-# (首次使用) 下載預設 LLM 模型
-docker exec -it voice-assistant-llm ollama pull qwen3.5:4b
 ```
 
 ### OpenHarness Bridge
@@ -92,40 +90,25 @@ curl http://localhost:8642/v1/chat/completions \
 	-d '{"model":"hermes-agent","messages":[{"role":"user","content":"只回答：HERMES-OK"}]}'
 ```
 
-`src/llm/docker-compose.yml` 將 Ollama context 設為 `65536`，並與 `src/hermes/config.yaml` 的 `model.context_length` 保持一致，以符合 Hermes 最低 `64000` 的要求。首次啟動會將此模板複製到 `hermes_data` named volume 內的 `/opt/data/config.yaml`；既有執行期設定不會被模板覆蓋。Hermes API 可執行終端與檔案工具，請勿將 `8642` 暴露到不受信任的網路。
+`src/llm/docker-compose.yml` 預設使用 Ollama；另可使用 `src/llm/docker-compose.llamacpp.yml` 啟動 llama.cpp CUDA server。兩者均將 context 設為 `65536`，並與 `src/hermes/config.yaml` 的 `model.context_length` 保持一致，以符合 Hermes 最低 `64000` 的要求。首次啟動會將此模板複製到 `hermes_data` named volume 內的 `/opt/data/config.yaml`；既有執行期設定不會被模板覆蓋。Hermes API 可執行終端與檔案工具，請勿將 `8642` 暴露到不受信任的網路。
 
 #### 切換 Hermes 預設模型
 
-若要從自訂 Modelfile 建立模型，先將檔案放在 `src/llm/modelfiles/`。該目錄會以唯讀方式掛載至 Ollama 容器的 `/modelfiles`：
+llama.cpp compose 預設從 Hugging Face 下載 `unsloth/Qwen3.5-4B-GGUF:Q4_K_M`，並將模型保存在 host 的 `src/llm/hg_models/`。若要改用其他 llama.cpp 相容模型，可覆寫 repository 與量化標籤：
 
 ```bash
-# 套用 /modelfiles 掛載
-docker compose -f src/llm/docker-compose.yml up -d --force-recreate
-
-# 建立模型；MODEL_NAME 不需要加 :latest
-docker exec voice-assistant-llm \
-	ollama create MODEL_NAME -f /modelfiles/FILE_NAME.Modelfile
-
-# 確認模型與實際 Modelfile 設定
-docker exec voice-assistant-llm ollama list
-docker exec voice-assistant-llm ollama show --modelfile MODEL_NAME
+LLAMA_HF_REPO=owner/model-GGUF:QUANT \
+	docker compose -f src/llm/docker-compose.llamacpp.yml up -d --force-recreate
 ```
 
-例如使用現有的 temperature `0.1` Modelfile 建立模型：
+確認 llama.cpp 已載入模型：
 
 ```bash
-docker exec voice-assistant-llm \
-	ollama create qwen3.5-4b-temp-0.1 \
-	-f /modelfiles/qwen3.5-4b-temperature-0.1.Modelfile
+curl http://localhost:11434/health
+curl http://localhost:11434/v1/models
 ```
 
-先確認目標模型已存在於 Ollama：
-
-```bash
-docker exec voice-assistant-llm ollama list
-```
-
-使用 Hermes CLI 修改 `hermes_data` volume 內的執行期設定，再重啟服務：
+llama.cpp 對外的模型 alias 預設為 `qwen3.5:4b`。若同時修改 `LLAMA_ARG_ALIAS`，請使用 Hermes CLI 將執行期模型名稱改成相同值，再重啟服務：
 
 ```bash
 docker exec voice-assistant-hermes \
@@ -137,15 +120,29 @@ docker exec voice-assistant-hermes \
 
 同時將 `src/hermes/config.yaml` 的 `model.default` 改成相同名稱，確保日後建立全新 volume 時仍使用該模型。只修改專案內的模板不會影響已存在的 volume。`GET /v1/models` 固定顯示 Hermes API alias `hermes-agent`，應使用 `hermes config get model.default` 檢查底層預設模型。
 
-目前 temperature `0.1` 的自訂模型可使用：
+STT 會將辨識文字送至 Hermes 的 `/v1/chat/completions`，並把 Hermes 的串流回答轉送給 Client/TTS。啟動 STT 時必須透過 `--env-file src/hermes/.env` 傳入相同的 `HERMES_API_KEY`。
+
+#### vLLM / AGX Thor 部署
+
+專案另提供 `src/llm/docker-compose.vllm.yml`，保留與 Ollama / llama.cpp 相同的 `11434` port、OpenAI 相容 API 與 `qwen3.5:4b` alias，因此 Hermes 設定不需修改。vLLM 使用 Hugging Face 原生權重而非 GGUF，下載內容同樣保存在 host 的 `src/llm/hg_models/`。
+
+先停止目前的 Ollama，再啟動 vLLM：
 
 ```bash
-docker exec voice-assistant-hermes \
-	hermes config set model.default qwen3.5-4b-temp-0.1
-docker restart voice-assistant-hermes
+docker compose -f src/llm/docker-compose.yml down
+docker compose -f src/llm/docker-compose.vllm.yml up -d
 ```
 
-STT 會將辨識文字送至 Hermes 的 `/v1/chat/completions`，並把 Hermes 的串流回答轉送給 Client/TTS。啟動 STT 時必須透過 `--env-file src/hermes/.env` 傳入相同的 `HERMES_API_KEY`。
+可透過環境變數覆寫 image、模型與 context：
+
+```bash
+VLLM_IMAGE=vllm/vllm-openai:latest \
+VLLM_MODEL=Qwen/Qwen3.5-4B \
+VLLM_MAX_MODEL_LEN=65536 \
+	docker compose -f src/llm/docker-compose.vllm.yml up -d
+```
+
+官方 vLLM image 同時提供 `amd64` 與 `arm64` manifest。AGX Thor 應使用 JetPack 7 與 CUDA 12.8 以上相容 image；若 JetPack 版本與 `latest` 不相容，請以 `VLLM_IMAGE` 指定經該 JetPack 驗證的 ARM64 image。Qwen3.5 4B BF16 加上 64K KV cache 不適合目前的 10GB RTX 3080，此 compose 主要供 AGX Thor 使用；本機仍建議使用 llama.cpp Q4_K_M。
 
 ---
 

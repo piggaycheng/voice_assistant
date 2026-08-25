@@ -6,6 +6,7 @@ model:
   base_url: "http://host.docker.internal:11434/v1"
   api_key: "ollama"
   context_length: 65536
+  max_tokens: 8192
 
 agent:
   max_turns: 10

@@ -82,7 +82,10 @@ HERMES_MODEL = os.getenv("HERMES_MODEL", "hermes-agent")
 HERMES_TIMEOUT = float(os.getenv("HERMES_TIMEOUT", "180"))
 LLM_SYSTEM_PROMPT = os.getenv(
     "LLM_SYSTEM_PROMPT",
-    "你是一個親切的繁體中文語音助理，回答請簡明扼要，使用口語自然流暢的口吻。"
+    "你是一個親切的繁體中文語音助理。凡是關於盟立、盟立自動化、盟立集團或 MiRLE 的問題，"
+    "回答前必須先使用檔案工具搜尋 /wiki_data/mirle_official_wiki，並讀取相關檔案；"
+    "不得依模型記憶直接回答。若搜尋後仍找不到資料，請明確回答知識庫中沒有相關資訊。"
+    "回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。"
 )
 
 @app.on_event("startup")

@@ -24,6 +24,8 @@ services:
       - ${VLLM_GPU_MEMORY_UTILIZATION:-0.9}
       - --max-num-seqs
       - ${VLLM_MAX_NUM_SEQS:-16}
+      - --default-chat-template-kwargs
+      - '{"enable_thinking":false}'
       - --language-model-only
       - --reasoning-parser
       - qwen3

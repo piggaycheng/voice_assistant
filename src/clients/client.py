@@ -1,12 +1,10 @@
 import os
-import io
 import sys
 import json
 import asyncio
+from urllib.parse import urlsplit, urlunsplit
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
-import httpx
 import websockets
 
 # 連線與音訊參數
@@ -16,8 +14,17 @@ ENABLE_TTS = os.getenv("ENABLE_TTS", "true").lower() in ("true", "1", "yes")
 TTS_VOICE = os.getenv("TTS_VOICE", "zf_xiaoxiao")
 TTS_SPEED = float(os.getenv("TTS_SPEED", "1.0"))
 TTS_MIN_SEGMENT_CHARS = int(os.getenv("TTS_MIN_SEGMENT_CHARS", "6"))
-TTS_MAX_SEGMENT_CHARS = int(os.getenv("TTS_MAX_SEGMENT_CHARS", "18"))
 TTS_SEGMENT_BOUNDARIES = frozenset("，,。！？!?；;：:\n")
+
+def build_tts_ws_url(tts_url: str) -> str:
+    parsed = urlsplit(tts_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    base_path = parsed.path.rstrip("/")
+    if base_path.endswith("/tts"):
+        base_path = base_path[:-4]
+    return urlunsplit((scheme, parsed.netloc, f"{base_path}/ws", "", ""))
+
+TTS_WS_URL = os.getenv("TTS_WS_URL", build_tts_ws_url(TTS_URL))
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -67,39 +74,53 @@ OUTPUT_DEVICE_ID = resolve_audio_device(os.getenv("AUDIO_OUTPUT_DEVICE", "pipewi
 is_playing_audio = False
 
 async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
-    """向 TTS 伺服器請求語音並透過喇叭播放"""
+    """透過 TTS WebSocket 接收 PCM 串流並即時播放。"""
     if not ENABLE_TTS or not text.strip():
         return
 
+    output_stream = None
     try:
-        print("\n🔊 [Kokoro TTS 合成中...]          ", end="\r", flush=True)
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                TTS_URL,
-                params={
-                    "text": text,
-                    "voice": TTS_VOICE,
-                    "speed": TTS_SPEED
-                }
-            )
+        print("\n🔊 [Kokoro TTS 串流合成中...]          ", end="\r", flush=True)
+        async with websockets.connect(TTS_WS_URL, max_size=None) as tts_ws:
+            await tts_ws.send(json.dumps({
+                "action": "synthesize",
+                "text": text,
+                "voice": TTS_VOICE,
+                "speed": TTS_SPEED
+            }))
 
-        if resp.status_code != 200:
-            print(f"\n⚠️  [TTS 伺服器錯誤] 狀態碼: {resp.status_code}")
-            return
+            async for message in tts_ws:
+                if isinstance(message, bytes):
+                    if output_stream is None:
+                        raise RuntimeError("TTS 未先傳送 audio_start")
+                    audio_data = np.frombuffer(message, dtype="<f4").reshape(-1, 1)
+                    await loop.run_in_executor(None, output_stream.write, audio_data)
+                    continue
 
-        # 解碼 WAV 音訊
-        audio_data, sample_rate = sf.read(io.BytesIO(resp.content), dtype="float32")
+                event = json.loads(message)
+                event_type = event.get("type")
+                if event_type == "audio_start":
+                    output_stream = sd.OutputStream(
+                        device=OUTPUT_DEVICE_ID,
+                        samplerate=int(event["sample_rate"]),
+                        channels=int(event.get("channels", 1)),
+                        dtype="float32"
+                    )
+                    output_stream.start()
+                    print("🔊 [AI PCM 串流播放中...]          ", end="\r", flush=True)
+                elif event_type == "done":
+                    break
+                elif event_type == "error":
+                    raise RuntimeError(event.get("error", "未知 TTS 錯誤"))
 
-        print(f"🔊 [AI 語音播放中 ({len(audio_data)/sample_rate:.1f}s)...]          ", end="\r", flush=True)
-
-        # 播放音訊並等待播放完成（指定 Output Device）
-        sd.play(audio_data, sample_rate, device=OUTPUT_DEVICE_ID)
-        await loop.run_in_executor(None, sd.wait)
-
-    except httpx.ConnectError:
-        print(f"\n⚠️  [TTS 連線失敗] 無法連線至 {TTS_URL}，請確認 TTS 容器是否已啟動。")
+    except (OSError, websockets.exceptions.WebSocketException):
+        print(f"\n⚠️  [TTS 連線失敗] 無法連線至 {TTS_WS_URL}，請確認 TTS 容器是否已啟動。")
     except Exception as e:
         print(f"\n⚠️  [TTS 播放異常] {e}")
+    finally:
+        if output_stream is not None:
+            await loop.run_in_executor(None, output_stream.stop)
+            output_stream.close()
 
 def extract_tts_segments(buffer: str, flush: bool = False) -> tuple[list[str], str]:
     """從 LLM 串流文字中取出適合立即朗讀的完整短句。"""
@@ -108,9 +129,7 @@ def extract_tts_segments(buffer: str, flush: bool = False) -> tuple[list[str], s
 
     for index, character in enumerate(buffer):
         candidate = buffer[segment_start:index + 1].strip()
-        reached_boundary = character in TTS_SEGMENT_BOUNDARIES and len(candidate) >= TTS_MIN_SEGMENT_CHARS
-        reached_max_length = len(candidate) >= TTS_MAX_SEGMENT_CHARS
-        if reached_boundary or reached_max_length:
+        if character in TTS_SEGMENT_BOUNDARIES and len(candidate) >= TTS_MIN_SEGMENT_CHARS:
             segments.append(candidate)
             segment_start = index + 1
 
@@ -162,7 +181,7 @@ async def audio_stream_client():
     print("=" * 65)
     print(" 🎙️  Voice Assistant 語音對話客戶端")
     print(f" 🔗 STT 伺服器: {SERVER_URI}")
-    print(f" 🔊 TTS 伺服器: {TTS_URL} (語音: {TTS_VOICE}, 語速: {TTS_SPEED})")
+    print(f" 🔊 TTS 伺服器: {TTS_WS_URL} (語音: {TTS_VOICE}, 語速: {TTS_SPEED})")
     print(f" ⚙️  TTS 語音播放: {'開啟' if ENABLE_TTS else '關閉'}")
     print(f" 🎤 麥克風 (Input):  {get_device_label(INPUT_DEVICE_ID, kind='input')}")
     print(f" 🔈 喇叭 (Output):   {get_device_label(OUTPUT_DEVICE_ID, kind='output')}")

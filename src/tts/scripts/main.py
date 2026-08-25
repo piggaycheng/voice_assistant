@@ -2,6 +2,7 @@ import os
 import io
 import json
 import asyncio
+import queue
 from typing import Optional, List, Dict
 import numpy as np
 import soundfile as sf
@@ -24,6 +25,7 @@ DEFAULT_LANG = os.getenv("TTS_DEFAULT_LANG", "z")       # 預設繁中/簡中 ('
 DEFAULT_VOICE = os.getenv("TTS_DEFAULT_VOICE", "zf_xiaoxiao")
 DEFAULT_SPEED = float(os.getenv("TTS_DEFAULT_SPEED", "1.0"))
 SAMPLE_RATE = 24000
+PCM_CHUNK_SAMPLES = int(os.getenv("TTS_PCM_CHUNK_SAMPLES", "4096"))
 
 # 支援的語音清單與說明
 SUPPORTED_VOICES: Dict[str, Dict[str, str]] = {
@@ -126,6 +128,32 @@ def synthesize_audio_sync(text: str, voice: str, lang_code: str, speed: float) -
     buffer = io.BytesIO()
     sf.write(buffer, full_audio, SAMPLE_RATE, format="WAV")
     return buffer.getvalue()
+
+def produce_pcm_chunks_sync(
+    text: str,
+    voice: str,
+    lang_code: str,
+    speed: float,
+    output_queue: queue.Queue
+):
+    """將 Kokoro 產生的音訊逐塊放入佇列，供 WebSocket 即時傳送。"""
+    try:
+        pipeline = get_or_create_pipeline(lang_code)
+        produced_audio = False
+        for _, _, audio in pipeline(text, voice=voice, speed=speed):
+            if audio is not None and len(audio) > 0:
+                produced_audio = True
+                pcm_chunk = np.asarray(audio, dtype="<f4")
+                for start in range(0, len(pcm_chunk), PCM_CHUNK_SAMPLES):
+                    output_queue.put((
+                        "audio",
+                        pcm_chunk[start:start + PCM_CHUNK_SAMPLES].tobytes()
+                    ))
+        if not produced_audio:
+            raise ValueError("未能生成任何語音資料")
+        output_queue.put(("done", None))
+    except Exception as e:
+        output_queue.put(("error", e))
 
 @app.get("/")
 def index():
@@ -256,19 +284,35 @@ async def websocket_tts_endpoint(websocket: WebSocket):
                 })
 
                 try:
-                    loop = asyncio.get_running_loop()
-                    wav_bytes = await loop.run_in_executor(
-                        None,
-                        synthesize_audio_sync,
+                    pcm_queue = queue.Queue(maxsize=4)
+                    producer_task = asyncio.create_task(asyncio.to_thread(
+                        produce_pcm_chunks_sync,
                         raw_text,
                         target_voice,
                         target_lang,
-                        target_speed
+                        target_speed,
+                        pcm_queue
+                    ))
+                    await websocket.send_json({
+                        "type": "audio_start",
+                        "sample_rate": SAMPLE_RATE,
+                        "channels": 1,
+                        "dtype": "float32"
+                    })
+
+                    while True:
+                        event, payload = await asyncio.to_thread(pcm_queue.get)
+                        if event == "audio":
+                            await websocket.send_bytes(payload)
+                        elif event == "done":
+                            break
+                        else:
+                            raise payload
+
+                    await producer_task
+                    await websocket.send_json(
+                        {"type": "done", "sample_rate": SAMPLE_RATE}
                     )
-                    # 先發送二進位音訊資料
-                    await websocket.send_bytes(wav_bytes)
-                    # 再發送完成通知
-                    await websocket.send_json({"type": "done", "sample_rate": SAMPLE_RATE})
                 except Exception as e:
                     print(f"[WebSocket-TTS 錯誤] {e}")
                     await websocket.send_json({"type": "error", "error": str(e)})

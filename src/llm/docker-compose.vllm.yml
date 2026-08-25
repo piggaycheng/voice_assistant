@@ -22,6 +22,8 @@ services:
       - ${VLLM_MAX_MODEL_LEN:-65536}
       - --gpu-memory-utilization
       - ${VLLM_GPU_MEMORY_UTILIZATION:-0.9}
+      - --max-num-seqs
+      - ${VLLM_MAX_NUM_SEQS:-16}
       - --language-model-only
       - --reasoning-parser
       - qwen3

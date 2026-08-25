@@ -137,12 +137,14 @@ docker compose -f src/llm/docker-compose.vllm.yml up -d
 
 ```bash
 VLLM_IMAGE=vllm/vllm-openai:latest \
-VLLM_MODEL=Qwen/Qwen3.5-4B \
+VLLM_MODEL=cyankiwi/Qwen3.5-4B-AWQ-4bit \
 VLLM_MAX_MODEL_LEN=65536 \
 	docker compose -f src/llm/docker-compose.vllm.yml up -d
 ```
 
-官方 vLLM image 同時提供 `amd64` 與 `arm64` manifest。AGX Thor 應使用 JetPack 7 與 CUDA 12.8 以上相容 image；若 JetPack 版本與 `latest` 不相容，請以 `VLLM_IMAGE` 指定經該 JetPack 驗證的 ARM64 image。Qwen3.5 4B BF16 加上 64K KV cache 不適合目前的 10GB RTX 3080，此 compose 主要供 AGX Thor 使用；本機仍建議使用 llama.cpp Q4_K_M。
+預設模型是 `cyankiwi/Qwen3.5-4B-AWQ-4bit`。其 4-bit 權重由 vLLM 依模型內的 `compressed-tensors` metadata 自動載入，不需額外指定 quantization 參數。AWQ 可大幅減少權重 VRAM，但 64K context 的 KV cache 仍會使用額外記憶體；若啟動時 OOM，可降低 `VLLM_MAX_MODEL_LEN`，但 Hermes 的 context 設定也必須同步調整。
+
+官方 vLLM image 同時提供 `amd64` 與 `arm64` manifest。AGX Thor 應使用 JetPack 7 與 CUDA 12.8 以上相容 image；若 JetPack 版本與 `latest` 不相容，請以 `VLLM_IMAGE` 指定經該 JetPack 驗證的 ARM64 image。
 
 ---
 

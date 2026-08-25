@@ -11,7 +11,7 @@ services:
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
     command:
-      - ${VLLM_MODEL:-Qwen/Qwen3.5-4B}
+      - ${VLLM_MODEL:-cyankiwi/Qwen3.5-4B-AWQ-4bit}
       - --served-model-name
       - qwen3.5:4b
       - --host

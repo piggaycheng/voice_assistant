@@ -86,6 +86,8 @@ LLM_SYSTEM_PROMPT = os.getenv(
     "回答前必須先使用檔案工具搜尋 /wiki_data/mirle_official_wiki，並讀取相關檔案；"
     "不得依模型記憶直接回答。若搜尋後仍找不到資料，請明確回答知識庫中沒有相關資訊。"
     "回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。"
+    "不得提及資料來源、檔案名稱、路徑、搜尋過程或工具使用情形，也不要附上引用或參考連結；"
+    "只直接回答結果。"
 )
 
 @app.on_event("startup")
@@ -145,7 +147,8 @@ async def stream_hermes_chat(websocket: WebSocket, history: list, user_text: str
     payload = {
         "model": HERMES_MODEL,
         "messages": messages,
-        "stream": True
+        "stream": True,
+        "max_tokens": 8192
     }
     headers = {"Authorization": f"Bearer {HERMES_API_KEY}"}
 

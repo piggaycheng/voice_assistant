@@ -90,7 +90,7 @@ curl http://localhost:8642/v1/chat/completions \
 	-d '{"model":"hermes-agent","messages":[{"role":"user","content":"只回答：HERMES-OK"}]}'
 ```
 
-`src/llm/docker-compose.yml` 預設使用 Ollama；另可使用 `src/llm/docker-compose.llamacpp.yml` 啟動 llama.cpp CUDA server。兩者均將 context 設為 `65536`，並與 `src/hermes/config.yaml` 的 `model.context_length` 保持一致，以符合 Hermes 最低 `64000` 的要求。首次啟動會將此模板複製到 `hermes_data` named volume 內的 `/opt/data/config.yaml`；既有執行期設定不會被模板覆蓋。Hermes API 可執行終端與檔案工具，請勿將 `8642` 暴露到不受信任的網路。
+`src/llm/docker-compose.yml` 預設使用 Ollama；另可使用 `src/llm/docker-compose.llamacpp.yml` 啟動 llama.cpp CUDA server。兩者均將 context 設為 `65536`，並與 `src/hermes/config.yaml` 的 `model.context_length` 保持一致，以符合 Hermes 最低 `64000` 的要求。容器每次啟動都會將此模板複製到 `hermes_data` named volume 內的 `/opt/data/config.yaml`。更新模板後執行 `docker compose --env-file src/hermes/.env -f src/hermes/docker-compose.yml restart hermes` 即可套用，不需刪除 volume；容器內透過 `hermes config set` 所做的變更會在下次重啟時被模板覆蓋。Hermes API 可執行終端與檔案工具，請勿將 `8642` 暴露到不受信任的網路。
 
 #### 切換 Hermes 預設模型
 
@@ -118,7 +118,7 @@ docker exec voice-assistant-hermes \
 	hermes config get model.default
 ```
 
-同時將 `src/hermes/config.yaml` 的 `model.default` 改成相同名稱，確保日後建立全新 volume 時仍使用該模型。只修改專案內的模板不會影響已存在的 volume。`GET /v1/models` 固定顯示 Hermes API alias `hermes-agent`，應使用 `hermes config get model.default` 檢查底層預設模型。
+同時將 `src/hermes/config.yaml` 的 `model.default` 改成相同名稱，確保容器下次啟動後仍使用該模型。`GET /v1/models` 固定顯示 Hermes API alias `hermes-agent`，應使用 `hermes config get model.default` 檢查底層預設模型。
 
 STT 會將辨識文字送至 Hermes 的 `/v1/chat/completions`，並把 Hermes 的串流回答轉送給 Client/TTS。啟動 STT 時必須透過 `--env-file src/hermes/.env` 傳入相同的 `HERMES_API_KEY`。
 

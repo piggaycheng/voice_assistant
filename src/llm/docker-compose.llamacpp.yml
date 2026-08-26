@@ -8,10 +8,11 @@ services:
       - "11434:8080"
     volumes:
       - ./hg_models:/models
+      - ./gguf_models:/models/gguf:ro
     environment:
       - LLAMA_CACHE=/models
-      - LLAMA_ARG_HF_REPO=${LLAMA_HF_REPO:-unsloth/Qwen3.5-4B-GGUF:Q4_K_M}
-      - LLAMA_ARG_ALIAS=qwen3.5:4b
+      - LLAMA_ARG_MODEL=${LLAMA_MODEL:-/models/gguf/Qwen3.5-9B-Q4_K_M.gguf}
+      - LLAMA_ARG_ALIAS=qwen3.5:9b
       - LLAMA_ARG_HOST=0.0.0.0
       - LLAMA_ARG_PORT=8080
       - LLAMA_ARG_CTX_SIZE=65536

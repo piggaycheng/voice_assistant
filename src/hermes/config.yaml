@@ -1,7 +1,7 @@
 _config_version: 38
 
 model:
-  default: "qwen3.5:4b"
+  default: "qwen3.5:9b"
   provider: "custom"
   base_url: "http://host.docker.internal:11434/v1"
   api_key: "ollama"
@@ -12,9 +12,11 @@ custom_providers:
   - name: "vllm-local"
     base_url: "http://host.docker.internal:11434/v1"
     api_key: "ollama"
-    model: "qwen3.5:4b"
+    model: "qwen3.5:9b"
     extra_body:
       temperature: 0.1
+      chat_template_kwargs:
+        enable_thinking: false
 
 agent:
   max_turns: 10

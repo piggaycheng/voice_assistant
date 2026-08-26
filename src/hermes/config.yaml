@@ -15,12 +15,12 @@ custom_providers:
     model: "qwen3.5:9b"
     extra_body:
       temperature: 0.1
-      chat_template_kwargs:
-        enable_thinking: false
+      # chat_template_kwargs:
+      #   enable_thinking: false
 
 agent:
   max_turns: 10
-  reasoning_effort: "none"
+  reasoning_effort: "medium"
 
 terminal:
   cwd: "/wiki_data"

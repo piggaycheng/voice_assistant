@@ -193,6 +193,8 @@ async def stream_hermes_chat(websocket: WebSocket, history: list, user_text: str
             print(f"[LLM 回覆完成] {complete_reply}")
         await websocket.send_json({"type": "llm_end", "text": complete_reply})
 
+    except WebSocketDisconnect:
+        raise
     except Exception as e:
         print(f"[LLM 連線失敗] {type(e).__name__}: {e}")
         await websocket.send_json({"type": "llm_error", "error": f"{type(e).__name__}: {e}"})
@@ -274,6 +276,7 @@ async def websocket_stt_endpoint(websocket: WebSocket):
     is_speaking = False
     consecutive_voice_frames = 0
     silence_samples = 0
+    processing_task = None
 
     # 建立該連線專屬的 Silero VAD 串流實例（維持獨立 hidden states）
     vad_stream = SileroVADStream(vad_model.session)
@@ -286,7 +289,18 @@ async def websocket_stt_endpoint(websocket: WebSocket):
         while True:
             message = await websocket.receive()
 
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
+
+            if processing_task is not None and processing_task.done():
+                await processing_task
+                processing_task = None
+                await websocket.send_json({"type": "status", "status": "ready"})
+
             if "bytes" in message and message["bytes"]:
+                if processing_task is not None:
+                    continue
+
                 data = message["bytes"]
                 chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                 chunk_samples = len(chunk)
@@ -327,7 +341,9 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                             full_audio = np.concatenate(audio_buffer)
 
                             if len(full_audio) >= min_speech_samples:
-                                await process_transcription(full_audio, websocket, conversation_history)
+                                processing_task = asyncio.create_task(
+                                    process_transcription(full_audio, websocket, conversation_history)
+                                )
                             else:
                                 print(f"[Silero VAD] 聲音過短 ({len(full_audio)/SAMPLE_RATE:.2f}s)，判定為雜音已忽略")
 
@@ -336,7 +352,6 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                             vad_stream.reset()
                             is_speaking = False
                             silence_samples = 0
-                            await websocket.send_json({"type": "status", "status": "ready"})
                 else:
                     # 介於 neg_threshold 與 threshold 之間（微弱發音或過渡）
                     if not is_speaking:
@@ -348,14 +363,15 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 # 超過最大長度限制 -> 強制處理語音
                 if is_speaking and sum(len(c) for c in audio_buffer) >= max_buffer_samples:
                     full_audio = np.concatenate(audio_buffer)
-                    await process_transcription(full_audio, websocket, conversation_history)
+                    processing_task = asyncio.create_task(
+                        process_transcription(full_audio, websocket, conversation_history)
+                    )
 
                     audio_buffer = []
                     pre_roll_buffer.clear()
                     vad_stream.reset()
                     is_speaking = False
                     silence_samples = 0
-                    await websocket.send_json({"type": "status", "status": "ready"})
 
             elif "text" in message and message["text"]:
                 try:
@@ -372,6 +388,11 @@ async def websocket_stt_endpoint(websocket: WebSocket):
         print(f"[WebSocket] 客戶端斷開連線: {client_info}")
     except Exception as e:
         print(f"[WebSocket] 錯誤發生: {e}")
+    finally:
+        if processing_task is not None:
+            if not processing_task.done():
+                processing_task.cancel()
+            await asyncio.gather(processing_task, return_exceptions=True)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

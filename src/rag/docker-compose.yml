@@ -18,6 +18,9 @@ services:
       - RAG_DB_PATH=/app/chroma_db
       - RAG_COLLECTION_NAME=obsidian_notes
       - RAG_EMBEDDING_MODEL=BAAI/bge-m3
+      - RAG_RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+      - RAG_RERANKER_REVISION=953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
+      - RAG_RERANK_CANDIDATES=20
       - RAG_TOP_K=3
       - RAG_CHROMA_BATCH_SIZE=1000
     healthcheck:

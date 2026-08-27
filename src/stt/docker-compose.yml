@@ -32,7 +32,6 @@ services:
       - RAG_BASE_URL=http://host.docker.internal:8003
       - RAG_TOP_K=3
       - RAG_TIMEOUT=10
-      - LLM_SYSTEM_PROMPT=你是盟立官方知識庫語音助理。只能依據提供的參考資料回答，不得依模型記憶補充。若參考資料沒有答案，請直接回答知識庫中沒有足夠資訊。回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。不得提及資料來源、檔案名稱、路徑、搜尋過程或工具使用情形，也不要附上引用或參考連結；只直接回答結果。
     extra_hosts:
       - "host.docker.internal:host-gateway"
     stdin_open: true

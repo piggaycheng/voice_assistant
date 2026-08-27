@@ -2,6 +2,8 @@ import os
 import json
 import asyncio
 from collections import deque
+from datetime import date
+
 import numpy as np
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -85,11 +87,21 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
 RAG_TIMEOUT = float(os.getenv("RAG_TIMEOUT", "10"))
 LLM_SYSTEM_PROMPT = os.getenv(
     "LLM_SYSTEM_PROMPT",
-    "你是盟立官方知識庫語音助理。只能依據提供的參考資料回答，不得依模型記憶補充。"
-    "若參考資料沒有答案，請直接回答知識庫中沒有足夠資訊。"
-    "回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。"
-    "不得提及資料來源、檔案名稱、路徑、搜尋過程或工具使用情形，也不要附上引用或參考連結；"
-    "只直接回答結果。"
+    """你是盟立官方知識庫語音助理。只能依據提供的參考資料回答，不得使用模型記憶補充、推測或虛構資訊。
+
+目前日期：{current_date}
+
+回答前必須依照以下規則判斷參考資料：
+1. 判斷問題是否涉及時效性。即使使用者沒有明確說「目前、最新、現任」，只要資訊可能隨時間改變，例如人員職務、組織架構、產品規格、價格、政策、財務數據、營運狀態、合作關係、服務內容或聯絡方式，都應視為查詢目前有效資訊。
+2. 若參考資料互相衝突，優先採用有效日期較新的資料；若沒有有效日期，再比較發布日期、更新日期或內容中明確提到的事件日期。
+3. 後續資料若明確表示接任、卸任、更新、修訂、取代、停止、退休、改名或變更，應視為已取代較早資料。
+4. 歷史新聞、歷年公告及過去事件中的描述只能代表當時狀態，不得直接當作目前狀態。
+5. 日期相近或無法判斷時，優先採用與問題最直接且具權威性的官方資料。公司治理、人事與財務優先採用董事會、投資人專區及重大公告；組織與職務優先採用經營團隊；產品與規格優先採用正式產品文件及產品頁面；新聞資料只作為事件與歷史背景，除非明確記載最新變更。
+6. 不得因資料排在較前面、文字較長或重複出現次數較多，就判定它較新或較正確。
+7. 若最新資料已能明確回答，只回答目前有效結果，不需要描述完整歷史沿革。
+8. 若參考資料沒有答案，或資料仍然衝突且不足以確認目前狀態，回答「知識庫資料不足以確認最新資訊」，不得自行選擇或猜測。
+
+回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用自然口語的繁體中文。不得提及參考資料、檔案名稱、路徑、檢索過程、排序分數、工具使用情形或參考連結。"""
 )
 
 @app.on_event("startup")
@@ -162,10 +174,15 @@ async def stream_llm_chat(websocket: WebSocket, history: list, user_text: str):
         await websocket.send_json({"type": "llm_error", "error": error_message})
         return
 
-    references = "\n\n---\n\n".join(match["content"] for match in matches if match.get("content"))
+    references = "\n\n---\n\n".join(
+        f"【來源：{match.get('metadata', {}).get('source', '未知')}】\n{match['content']}"
+        for match in matches
+        if match.get("content")
+    )
+    system_prompt = LLM_SYSTEM_PROMPT.replace("{current_date}", date.today().isoformat())
     history.append({"role": "user", "content": user_text})
     messages = [
-        {"role": "system", "content": f"{LLM_SYSTEM_PROMPT}\n\n【參考資料】\n{references}"}
+        {"role": "system", "content": f"{system_prompt}\n\n【參考資料】\n{references}"}
     ] + list(history)[-8:]
 
     payload = {

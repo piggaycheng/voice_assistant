@@ -8,18 +8,31 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder, SentenceTransformer
 
 VAULT_PATH = os.getenv("RAG_VAULT_PATH", "./wiki_data/mirle_official_wiki")
 DB_PATH = os.getenv("RAG_DB_PATH", "./chroma_db")
 COLLECTION_NAME = os.getenv("RAG_COLLECTION_NAME", "obsidian_notes")
 EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
 EMBEDDING_DEVICE = os.getenv("RAG_EMBEDDING_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+RERANKER_MODEL = os.getenv("RAG_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANKER_REVISION = os.getenv(
+    "RAG_RERANKER_REVISION", "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
+)
+RERANKER_DEVICE = os.getenv("RAG_RERANKER_DEVICE", EMBEDDING_DEVICE)
+RERANK_CANDIDATES = int(os.getenv("RAG_RERANK_CANDIDATES", "20"))
 DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
 CHROMA_BATCH_SIZE = int(os.getenv("RAG_CHROMA_BATCH_SIZE", "1000"))
 
 app = FastAPI(title="Voice Assistant RAG API", version="1.0.0")
 embed_model = SentenceTransformer(EMBEDDING_MODEL, device=EMBEDDING_DEVICE)
+reranker = CrossEncoder(
+    RERANKER_MODEL,
+    device=RERANKER_DEVICE,
+    revision=RERANKER_REVISION,
+    trust_remote_code=True,
+    model_kwargs={"torch_dtype": "auto"},
+)
 chroma_client = chromadb.PersistentClient(path=DB_PATH)
 collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
 index_lock = Lock()
@@ -66,6 +79,8 @@ def health():
         "document_count": collection.count(),
         "embedding_model": EMBEDDING_MODEL,
         "embedding_device": EMBEDDING_DEVICE,
+        "reranker_model": RERANKER_MODEL,
+        "reranker_device": RERANKER_DEVICE,
     }
 
 
@@ -119,17 +134,32 @@ def query_index(request: QueryRequest):
         raise HTTPException(status_code=409, detail="Index is empty; call POST /index first")
 
     query_embedding = embed_model.encode(request.query, normalize_embeddings=True).tolist()
+    candidate_count = min(max(request.top_k, RERANK_CANDIDATES), document_count)
     result = collection.query(
         query_embeddings=[query_embedding],
-        n_results=min(request.top_k, document_count),
+        n_results=candidate_count,
         include=["documents", "metadatas", "distances"],
     )
-    matches = [
-        {"content": content, "metadata": metadata, "distance": distance}
-        for content, metadata, distance in zip(
-            result["documents"][0], result["metadatas"][0], result["distances"][0]
-        )
-    ]
+    candidates = list(zip(
+        result["documents"][0], result["metadatas"][0], result["distances"][0]
+    ))
+    rerank_scores = reranker.predict(
+        [(request.query, content) for content, _, _ in candidates],
+        show_progress_bar=False,
+    )
+    matches = sorted(
+        (
+            {
+                "content": content,
+                "metadata": metadata,
+                "distance": distance,
+                "rerank_score": float(score),
+            }
+            for (content, metadata, distance), score in zip(candidates, rerank_scores)
+        ),
+        key=lambda match: match["rerank_score"],
+        reverse=True,
+    )[:request.top_k]
     return {"query": request.query, "matches": matches}
 
 if __name__ == "__main__":

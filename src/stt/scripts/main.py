@@ -9,7 +9,7 @@ from faster_whisper import WhisperModel
 from faster_whisper.vad import get_vad_model
 import uvicorn
 
-app = FastAPI(title="Faster-Whisper STT & Hermes Voice Assistant Server")
+app = FastAPI(title="Faster-Whisper STT & RAG Voice Assistant Server")
 
 # 全域模型實例
 model: WhisperModel = None
@@ -74,18 +74,19 @@ class SileroVADStream:
         self.remainder = audio
         return probs
 
-# Hermes Agent 串接設定
+# LLM 與 RAG 串接設定
 ENABLE_LLM = os.getenv("ENABLE_LLM", "true").lower() in ("true", "1", "yes")
-HERMES_BASE_URL = os.getenv("HERMES_BASE_URL", "http://host.docker.internal:8642")
-HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
-HERMES_MODEL = os.getenv("HERMES_MODEL", "hermes-agent")
-HERMES_TIMEOUT = float(os.getenv("HERMES_TIMEOUT", "180"))
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://host.docker.internal:11434/v1")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "dummy-key")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5:4b")
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))
+RAG_BASE_URL = os.getenv("RAG_BASE_URL", "http://host.docker.internal:8003")
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+RAG_TIMEOUT = float(os.getenv("RAG_TIMEOUT", "10"))
 LLM_SYSTEM_PROMPT = os.getenv(
     "LLM_SYSTEM_PROMPT",
-    "你是盟立官方知識庫語音助理。回答任何問題前，必須先使用檔案工具搜尋 "
-    "/wiki_data/mirle_official_wiki，並讀取相關檔案，不得依模型記憶直接回答。"
-    "即使問題只包含產品名稱、縮寫或簡短關鍵字，也必須視為盟立相關查詢。"
-    "若搜尋後仍找不到資料，請直接回答知識庫中沒有足夠資訊。"
+    "你是盟立官方知識庫語音助理。只能依據提供的參考資料回答，不得依模型記憶補充。"
+    "若參考資料沒有答案，請直接回答知識庫中沒有足夠資訊。"
     "回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。"
     "不得提及資料來源、檔案名稱、路徑、搜尋過程或工具使用情形，也不要附上引用或參考連結；"
     "只直接回答結果。"
@@ -108,10 +109,9 @@ def load_whisper_model():
     print(f" - Silero VAD 門檻: 人聲={VAD_THRESHOLD}, 靜音={VAD_NEG_THRESHOLD}")
     print(f" - LLM 串接: {'開啟' if ENABLE_LLM else '關閉'}")
     if ENABLE_LLM:
-        if len(HERMES_API_KEY) < 16:
-            raise RuntimeError("ENABLE_LLM=true 時，HERMES_API_KEY 必須至少 16 個字元")
-        print(f" - Hermes 位址: {HERMES_BASE_URL}")
-        print(f" - Hermes 模型: {HERMES_MODEL}")
+        print(f" - LLM 位址: {LLM_BASE_URL}")
+        print(f" - LLM 模型: {LLM_MODEL}")
+        print(f" - RAG 位址: {RAG_BASE_URL}")
     print("=" * 50)
 
     # 載入 Silero VAD (ONNX)
@@ -133,40 +133,65 @@ def index():
         "status": "running",
         "service": "faster-whisper-stt-websocket",
         "llm_enabled": ENABLE_LLM,
-        "llm_backend": "hermes",
-        "llm_model": HERMES_MODEL
+        "llm_backend": "openai-compatible",
+        "llm_model": LLM_MODEL
     }
 
-async def stream_hermes_chat(websocket: WebSocket, history: list, user_text: str):
-    """將使用者文字送往 Hermes Agent 並串流回傳回答"""
+async def stream_llm_chat(websocket: WebSocket, history: list, user_text: str):
+    """檢索 RAG 後將使用者文字送往 LLM，並串流回傳回答"""
     if not ENABLE_LLM:
         return
 
+    try:
+        async with httpx.AsyncClient(timeout=RAG_TIMEOUT) as client:
+            rag_response = await client.post(
+                f"{RAG_BASE_URL.rstrip('/')}/query",
+                json={"query": user_text, "top_k": RAG_TOP_K},
+            )
+            rag_response.raise_for_status()
+            matches = rag_response.json().get("matches", [])
+    except (httpx.HTTPError, ValueError) as error:
+        error_message = f"RAG 查詢失敗: {type(error).__name__}: {error}"
+        print(f"[RAG 錯誤] {error_message}")
+        await websocket.send_json({"type": "llm_error", "error": error_message})
+        return
+
+    if not matches:
+        error_message = "RAG 查無相關資料"
+        print(f"[RAG] {error_message}")
+        await websocket.send_json({"type": "llm_error", "error": error_message})
+        return
+
+    references = "\n\n---\n\n".join(match["content"] for match in matches if match.get("content"))
     history.append({"role": "user", "content": user_text})
-    messages = [{"role": "system", "content": LLM_SYSTEM_PROMPT}] + list(history)[-8:]
+    messages = [
+        {"role": "system", "content": f"{LLM_SYSTEM_PROMPT}\n\n【參考資料】\n{references}"}
+    ] + list(history)[-8:]
 
     payload = {
-        "model": HERMES_MODEL,
+        "model": LLM_MODEL,
         "messages": messages,
+        "temperature": 0.0,
         "stream": True,
         "max_tokens": 8192
     }
-    headers = {"Authorization": f"Bearer {HERMES_API_KEY}"}
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}"}
 
-    print(f"[LLM] 正在請求 Hermes Agent ({HERMES_MODEL}) 生成回覆...")
+    print(f"[RAG] 已取得 {len(matches)} 筆參考資料")
+    print(f"[LLM] 正在請求 {LLM_MODEL} 生成回覆...")
     await websocket.send_json({"type": "llm_start"})
     full_response = []
 
     try:
-        async with httpx.AsyncClient(timeout=HERMES_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
             async with client.stream(
                 "POST",
-                f"{HERMES_BASE_URL.rstrip('/')}/v1/chat/completions",
+                f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
                 json=payload,
                 headers=headers,
             ) as response:
                 if response.status_code != 200:
-                    err_msg = f"Hermes 回應狀態碼異常: {response.status_code}"
+                    err_msg = f"LLM 回應狀態碼異常: {response.status_code}"
                     print(f"[LLM 錯誤] {err_msg}")
                     await websocket.send_json({"type": "llm_error", "error": err_msg})
                     return
@@ -259,7 +284,7 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
         })
 
         # 串接 Ollama 生成回答
-        await stream_hermes_chat(websocket, history, text)
+        await stream_llm_chat(websocket, history, text)
     else:
         print("[STT] 未辨識出有效文字（已過濾雜音/幻覺）")
         await websocket.send_json({"type": "status", "status": "empty"})

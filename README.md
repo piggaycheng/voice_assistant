@@ -15,21 +15,34 @@
 
 ## 1. 啟動後端服務
 
-首次啟動先建立 Hermes 與 STT 共用的 API key 設定：
-
 ```bash
-cp src/hermes/.env.example src/hermes/.env
-# 編輯 src/hermes/.env，將 HERMES_API_KEY 換成至少 16 字元的長隨機字串
-```
-
-```bash
-# 啟動全部 Docker 容器 (LLM / Hermes / TTS / STT)
+# 啟動主要 Docker 容器 (LLM / RAG / TTS / STT)
 docker compose -f src/llm/docker-compose.yml up -d && \
-docker compose --env-file src/hermes/.env -f src/hermes/docker-compose.yml up -d && \
+docker compose -f src/rag/docker-compose.yml up -d && \
 docker compose -f src/tts/docker-compose.yml up -d && \
-docker compose --env-file src/hermes/.env -f src/stt/docker-compose.yml up -d
+docker compose -f src/stt/docker-compose.yml up -d
 
 ```
+
+### RAG API
+
+RAG 服務只負責建立向量索引與檢索內容，不會直接呼叫 LLM。STT 會將 `/query` 回傳的 `matches` 組成參考資料，再直接呼叫 `11434` 的 OpenAI 相容 LLM API 產生回答。
+
+```bash
+docker compose -f src/rag/docker-compose.yml up -d
+
+# 建立或重建索引
+curl -X POST http://localhost:8003/index \
+	-H "Content-Type: application/json" \
+	-d '{"rebuild":true}'
+
+# 查詢最相關的三個片段
+curl -X POST http://localhost:8003/query \
+	-H "Content-Type: application/json" \
+	-d '{"query":"盟立提供哪些自動化解決方案？","top_k":3}'
+```
+
+服務狀態與 Swagger API 文件分別位於 `http://localhost:8003/health` 與 `http://localhost:8003/docs`。
 
 ### OpenHarness Bridge
 
@@ -120,11 +133,11 @@ docker exec voice-assistant-hermes \
 
 同時將 `src/hermes/config.yaml` 的 `model.default` 改成相同名稱，確保容器下次啟動後仍使用該模型。`GET /v1/models` 固定顯示 Hermes API alias `hermes-agent`，應使用 `hermes config get model.default` 檢查底層預設模型。
 
-STT 會將辨識文字送至 Hermes 的 `/v1/chat/completions`，並把 Hermes 的串流回答轉送給 Client/TTS。啟動 STT 時必須透過 `--env-file src/hermes/.env` 傳入相同的 `HERMES_API_KEY`。
+Hermes 是選用的 Agent 服務；目前主要語音流程不依賴 Hermes。STT 會先向 RAG 查詢參考資料，再直接呼叫 LLM 的 `/v1/chat/completions`，並將串流回答轉送給 Client/TTS。
 
 #### vLLM / AGX Thor 部署
 
-專案另提供 `src/llm/docker-compose.vllm.yml`，保留與 Ollama / llama.cpp 相同的 `11434` port、OpenAI 相容 API 與 `qwen3.5:4b` alias，因此 Hermes 設定不需修改。vLLM 使用 Hugging Face 原生權重而非 GGUF，下載內容同樣保存在 host 的 `src/llm/hg_models/`。
+專案另提供 `src/llm/docker-compose.vllm.yml`，保留與 Ollama / llama.cpp 相同的 `11434` port、OpenAI 相容 API 與 `qwen3.5:4b` alias，因此 STT 設定不需修改。vLLM 使用 Hugging Face 原生權重而非 GGUF，下載內容同樣保存在 host 的 `src/llm/hg_models/`。
 
 先停止目前的 Ollama，再啟動 vLLM：
 

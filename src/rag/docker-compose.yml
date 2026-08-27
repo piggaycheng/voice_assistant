@@ -1,0 +1,35 @@
+services:
+  rag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    container_name: voice-assistant-rag
+    restart: unless-stopped
+    ports:
+      - "8003:8000"
+    volumes:
+      - .:/app
+      - ./models:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HF_TOKEN=${HF_TOKEN:-}
+      - RAG_VAULT_PATH=/app/wiki_data/mirle_official_wiki
+      - RAG_DB_PATH=/app/chroma_db
+      - RAG_COLLECTION_NAME=obsidian_notes
+      - RAG_EMBEDDING_MODEL=BAAI/bge-m3
+      - RAG_TOP_K=3
+      - RAG_CHROMA_BATCH_SIZE=1000
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

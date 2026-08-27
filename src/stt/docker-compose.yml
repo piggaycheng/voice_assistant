@@ -22,13 +22,17 @@ services:
       - SILENCE_DURATION=0.8
       - MIN_SPEECH_DURATION=0.4
       - CONSECUTIVE_FRAMES=1
-      # Hermes Agent 串接設定
+      # OpenAI 相容 LLM 串接設定
       - ENABLE_LLM=true
-      - HERMES_BASE_URL=http://host.docker.internal:8642
-      - HERMES_API_KEY=${HERMES_API_KEY:-}
-      - HERMES_MODEL=hermes-agent
-      - HERMES_TIMEOUT=180
-      - LLM_SYSTEM_PROMPT=你是盟立官方知識庫語音助理。回答任何問題前，必須先使用檔案工具搜尋 /wiki_data/mirle_official_wiki，並讀取相關檔案，不得依模型記憶直接回答。即使問題只包含產品名稱、縮寫或簡短關鍵字，也必須視為盟立相關查詢。若搜尋後仍找不到資料，請直接回答知識庫中沒有足夠資訊。回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。不得提及資料來源、檔案名稱、路徑、搜尋過程或工具使用情形，也不要附上引用或參考連結；只直接回答結果。
+      - LLM_BASE_URL=http://host.docker.internal:11434/v1
+      - LLM_API_KEY=${LLM_API_KEY:-dummy-key}
+      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
+      - LLM_TIMEOUT=180
+      # RAG 檢索設定
+      - RAG_BASE_URL=http://host.docker.internal:8003
+      - RAG_TOP_K=3
+      - RAG_TIMEOUT=10
+      - LLM_SYSTEM_PROMPT=你是盟立官方知識庫語音助理。只能依據提供的參考資料回答，不得依模型記憶補充。若參考資料沒有答案，請直接回答知識庫中沒有足夠資訊。回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。不得提及資料來源、檔案名稱、路徑、搜尋過程或工具使用情形，也不要附上引用或參考連結；只直接回答結果。
     extra_hosts:
       - "host.docker.internal:host-gateway"
     stdin_open: true

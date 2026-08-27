@@ -22,6 +22,9 @@ services:
       - SILENCE_DURATION=0.8
       - MIN_SPEECH_DURATION=0.4
       - CONSECUTIVE_FRAMES=1
+      - ENABLE_NOISE_SUPPRESSION=true
+      - NOISE_REDUCTION_STRENGTH=1.25
+      - MAX_NORMALIZATION_GAIN=3.0
       # OpenAI 相容 LLM 串接設定
       - ENABLE_LLM=true
       - LLM_BASE_URL=http://host.docker.internal:11434/v1

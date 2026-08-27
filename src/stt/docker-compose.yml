@@ -11,9 +11,9 @@ services:
       - .:/app
     environment:
       - PYTHONUNBUFFERED=1
-      - WHISPER_MODEL=small
-      - WHISPER_DEVICE=cpu
-      - WHISPER_COMPUTE_TYPE=int8
+      - WHISPER_MODEL=large-v3-turbo
+      - WHISPER_DEVICE=cuda
+      - WHISPER_COMPUTE_TYPE=float16
       - WHISPER_DOWNLOAD_ROOT=/app/models
       - HF_HOME=/app/models
       - VAD_THRESHOLD=0.35
@@ -34,5 +34,12 @@ services:
       - RAG_TIMEOUT=10
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     stdin_open: true
     tty: true

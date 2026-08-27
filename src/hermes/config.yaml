@@ -1,0 +1,44 @@
+_config_version: 38
+
+model:
+  default: "qwen3.5:9b"
+  provider: "custom"
+  base_url: "http://host.docker.internal:11434/v1"
+  api_key: "ollama"
+  context_length: 65536
+  max_tokens: 8192
+
+custom_providers:
+  - name: "vllm-local"
+    base_url: "http://host.docker.internal:11434/v1"
+    api_key: "ollama"
+    model: "qwen3.5:9b"
+    extra_body:
+      temperature: 0.1
+      # chat_template_kwargs:
+      #   enable_thinking: false
+
+agent:
+  max_turns: 10
+  reasoning_effort: "medium"
+
+terminal:
+  cwd: "/wiki_data"
+
+platform_toolsets:
+  api_server:
+    - file
+
+known_builtin_toolsets:
+  api_server:
+    - bfl
+
+auxiliary:
+  title_generation:
+    enabled: false
+
+tool_loop_guardrails:
+  hard_stop_enabled: true
+
+display:
+  language: "zh-hant"

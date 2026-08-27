@@ -8,9 +8,12 @@ services:
     volumes:
       # 持久化儲存下載的模型（對應 host 端的 ./models）
       - ./models:/root/.ollama
+      # 掛載自訂 Ollama Modelfile，容器內可從 /modelfiles 讀取
+      - ./modelfiles:/modelfiles:ro
     environment:
       - OLLAMA_KEEP_ALIVE=24h
       - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_CONTEXT_LENGTH=65536
     # 若具備 NVIDIA GPU 並已安裝 nvidia-container-toolkit，可啟用 GPU 加速：
     deploy:
       resources:

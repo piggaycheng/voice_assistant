@@ -1,0 +1,31 @@
+services:
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: voice-assistant-llm
+    restart: unless-stopped
+    command: ["--no-mmproj"]
+    ports:
+      - "11434:8080"
+    volumes:
+      - ./hg_models:/models
+      - ./gguf_models:/models/gguf:ro
+    environment:
+      - LLAMA_CACHE=/models
+      - LLAMA_ARG_MODEL=${LLAMA_MODEL:-/models/gguf/Qwen3.5-9B-Q4_K_M.gguf}
+      - LLAMA_ARG_ALIAS=qwen3.5:9b
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=8080
+      - LLAMA_ARG_CTX_SIZE=65536
+      - LLAMA_ARG_N_PARALLEL=1
+      - LLAMA_ARG_N_GPU_LAYERS=all
+      - LLAMA_ARG_FLASH_ATTN=on
+      - LLAMA_ARG_CACHE_TYPE_K=q8_0
+      - LLAMA_ARG_CACHE_TYPE_V=q8_0
+      - LLAMA_ARG_TEMPERATURE=0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

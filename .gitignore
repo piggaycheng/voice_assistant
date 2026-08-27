@@ -7,7 +7,19 @@ env/
 __pycache__/
 *.py[cod]
 
+# OpenHarness provider settings and credentials
+src/openharness/config/*
+!src/openharness/config/.gitkeep
+
+# hermes-agent data
+mirle_official_wiki/
+
 # Model Weights & Cache
 models/
+src/llm/hg_models/
+src/llm/gguf_models/
 .cache/
 *.log
+
+# env file
+.env

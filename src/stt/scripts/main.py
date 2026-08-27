@@ -9,7 +9,7 @@ from faster_whisper import WhisperModel
 from faster_whisper.vad import get_vad_model
 import uvicorn
 
-app = FastAPI(title="Faster-Whisper STT & Ollama Voice Assistant Server")
+app = FastAPI(title="Faster-Whisper STT & Hermes Voice Assistant Server")
 
 # 全域模型實例
 model: WhisperModel = None
@@ -23,6 +23,18 @@ MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.4")) # 最�
 MAX_BUFFER_SEC = 20.0  # 單次發話最大上限長度 (秒)
 PRE_ROLL_CHUNKS = int(os.getenv("PRE_ROLL_CHUNKS", "14")) # 前置音訊緩衝 (14 chunks = 700ms，完整保留開頭發音與自然聲學上下文)
 CONSECUTIVE_FRAMES_TRIGGER = int(os.getenv("CONSECUTIVE_FRAMES", "1")) # 1 幀達標即觸發錄音，零延遲響應
+
+WHISPER_INITIAL_PROMPT = "繁體中文日常語音對話。公司名稱：盟立、盟立自動化、盟立集團、MiRLE。"
+COMPANY_ALIASES = {
+    "夢立": "盟立",
+    "猛力": "盟立",
+    "盟力": "盟立",
+}
+
+def normalize_company_aliases(text: str) -> str:
+    for alias, canonical_name in COMPANY_ALIASES.items():
+        text = text.replace(alias, canonical_name)
+    return text
 
 class SileroVADStream:
     """即時串流 Silero VAD (基於 ONNX)，維持每個連線獨立的 hidden state 與 context"""
@@ -62,15 +74,21 @@ class SileroVADStream:
         self.remainder = audio
         return probs
 
-# Ollama 串接設定
+# Hermes Agent 串接設定
 ENABLE_LLM = os.getenv("ENABLE_LLM", "true").lower() in ("true", "1", "yes")
-LLM_THINK = os.getenv("LLM_THINK", "false").lower() in ("true", "1", "yes")
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
+HERMES_BASE_URL = os.getenv("HERMES_BASE_URL", "http://host.docker.internal:8642")
+HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
+HERMES_MODEL = os.getenv("HERMES_MODEL", "hermes-agent")
+HERMES_TIMEOUT = float(os.getenv("HERMES_TIMEOUT", "180"))
 LLM_SYSTEM_PROMPT = os.getenv(
     "LLM_SYSTEM_PROMPT",
-    "你是一個親切的繁體中文語音助理，回答請簡明扼要，使用口語自然流暢的口吻。"
+    "你是盟立官方知識庫語音助理。回答任何問題前，必須先使用檔案工具搜尋 "
+    "/wiki_data/mirle_official_wiki，並讀取相關檔案，不得依模型記憶直接回答。"
+    "即使問題只包含產品名稱、縮寫或簡短關鍵字，也必須視為盟立相關查詢。"
+    "若搜尋後仍找不到資料，請直接回答知識庫中沒有足夠資訊。"
+    "回答限制在 1 至 2 句、30 字以內，只提供最重要資訊，不要重述問題，使用口語自然流暢的口吻。"
+    "不得提及資料來源、檔案名稱、路徑、搜尋過程或工具使用情形，也不要附上引用或參考連結；"
+    "只直接回答結果。"
 )
 
 @app.on_event("startup")
@@ -90,10 +108,10 @@ def load_whisper_model():
     print(f" - Silero VAD 門檻: 人聲={VAD_THRESHOLD}, 靜音={VAD_NEG_THRESHOLD}")
     print(f" - LLM 串接: {'開啟' if ENABLE_LLM else '關閉'}")
     if ENABLE_LLM:
-        print(f" - Ollama 位址: {OLLAMA_BASE_URL}")
-        print(f" - Ollama 模型: {OLLAMA_MODEL}")
-        print(f" - 思考模式 (Think): {'開啟' if LLM_THINK else '關閉 (No Think 模式，極速秒回)'}")
-        print(f" - 溫度係數 (Temperature): {LLM_TEMPERATURE}")
+        if len(HERMES_API_KEY) < 16:
+            raise RuntimeError("ENABLE_LLM=true 時，HERMES_API_KEY 必須至少 16 個字元")
+        print(f" - Hermes 位址: {HERMES_BASE_URL}")
+        print(f" - Hermes 模型: {HERMES_MODEL}")
     print("=" * 50)
 
     # 載入 Silero VAD (ONNX)
@@ -115,13 +133,12 @@ def index():
         "status": "running",
         "service": "faster-whisper-stt-websocket",
         "llm_enabled": ENABLE_LLM,
-        "llm_think": LLM_THINK,
-        "llm_temperature": LLM_TEMPERATURE,
-        "llm_model": OLLAMA_MODEL
+        "llm_backend": "hermes",
+        "llm_model": HERMES_MODEL
     }
 
-async def stream_ollama_chat(websocket: WebSocket, history: list, user_text: str):
-    """將使用者文字送往 Ollama 並串流回傳回答"""
+async def stream_hermes_chat(websocket: WebSocket, history: list, user_text: str):
+    """將使用者文字送往 Hermes Agent 並串流回傳回答"""
     if not ENABLE_LLM:
         return
 
@@ -129,41 +146,46 @@ async def stream_ollama_chat(websocket: WebSocket, history: list, user_text: str
     messages = [{"role": "system", "content": LLM_SYSTEM_PROMPT}] + list(history)[-8:]
 
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": HERMES_MODEL,
         "messages": messages,
-        "think": LLM_THINK,
-        "options": {
-            "temperature": LLM_TEMPERATURE
-        },
-        "stream": True
+        "stream": True,
+        "max_tokens": 8192
     }
+    headers = {"Authorization": f"Bearer {HERMES_API_KEY}"}
 
-    print(f"[LLM] 正在請求 {OLLAMA_MODEL} 生成回覆...")
+    print(f"[LLM] 正在請求 Hermes Agent ({HERMES_MODEL}) 生成回覆...")
     await websocket.send_json({"type": "llm_start"})
     full_response = []
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async with client.stream("POST", f"{OLLAMA_BASE_URL}/api/chat", json=payload) as response:
+        async with httpx.AsyncClient(timeout=HERMES_TIMEOUT) as client:
+            async with client.stream(
+                "POST",
+                f"{HERMES_BASE_URL.rstrip('/')}/v1/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as response:
                 if response.status_code != 200:
-                    err_msg = f"Ollama 回應狀態碼異常: {response.status_code}"
+                    err_msg = f"Hermes 回應狀態碼異常: {response.status_code}"
                     print(f"[LLM 錯誤] {err_msg}")
                     await websocket.send_json({"type": "llm_error", "error": err_msg})
                     return
 
                 async for line in response.aiter_lines():
-                    if not line:
+                    if not line.startswith("data:"):
                         continue
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
                     try:
-                        chunk_data = json.loads(line)
-                        msg_chunk = chunk_data.get("message", {}).get("content", "")
+                        chunk_data = json.loads(data)
+                        choices = chunk_data.get("choices", [])
+                        msg_chunk = choices[0].get("delta", {}).get("content", "") if choices else ""
                         if msg_chunk:
                             full_response.append(msg_chunk)
                             await websocket.send_json({"type": "llm_chunk", "chunk": msg_chunk})
-                        if chunk_data.get("done", False):
-                            break
-                    except Exception:
-                        pass
+                    except (json.JSONDecodeError, AttributeError, IndexError):
+                        continue
 
         complete_reply = "".join(full_response).strip()
         if complete_reply:
@@ -171,6 +193,8 @@ async def stream_ollama_chat(websocket: WebSocket, history: list, user_text: str
             print(f"[LLM 回覆完成] {complete_reply}")
         await websocket.send_json({"type": "llm_end", "text": complete_reply})
 
+    except WebSocketDisconnect:
+        raise
     except Exception as e:
         print(f"[LLM 連線失敗] {type(e).__name__}: {e}")
         await websocket.send_json({"type": "llm_error", "error": f"{type(e).__name__}: {e}"})
@@ -201,7 +225,7 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
             temperature=0.0,
             condition_on_previous_text=False,
             language="zh",
-            initial_prompt="繁體中文日常語音對話。",
+            initial_prompt=WHISPER_INITIAL_PROMPT,
             vad_filter=False,
             no_speech_threshold=0.6,
             log_prob_threshold=-1.0,
@@ -220,9 +244,12 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
             continue
         valid_segments.append(s.text.strip())
 
-    text = "".join(valid_segments).strip()
+    raw_text = "".join(valid_segments).strip()
+    text = normalize_company_aliases(raw_text)
 
     if text:
+        if text != raw_text:
+            print(f"[STT 名稱修正] {raw_text} -> {text}")
         print(f"[STT 結果] {text} (語言: {info.language}, 音訊長度: {audio_duration}s)")
         await websocket.send_json({
             "type": "result",
@@ -232,7 +259,7 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
         })
 
         # 串接 Ollama 生成回答
-        await stream_ollama_chat(websocket, history, text)
+        await stream_hermes_chat(websocket, history, text)
     else:
         print("[STT] 未辨識出有效文字（已過濾雜音/幻覺）")
         await websocket.send_json({"type": "status", "status": "empty"})
@@ -249,6 +276,7 @@ async def websocket_stt_endpoint(websocket: WebSocket):
     is_speaking = False
     consecutive_voice_frames = 0
     silence_samples = 0
+    processing_task = None
 
     # 建立該連線專屬的 Silero VAD 串流實例（維持獨立 hidden states）
     vad_stream = SileroVADStream(vad_model.session)
@@ -261,7 +289,18 @@ async def websocket_stt_endpoint(websocket: WebSocket):
         while True:
             message = await websocket.receive()
 
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
+
+            if processing_task is not None and processing_task.done():
+                await processing_task
+                processing_task = None
+                await websocket.send_json({"type": "status", "status": "ready"})
+
             if "bytes" in message and message["bytes"]:
+                if processing_task is not None:
+                    continue
+
                 data = message["bytes"]
                 chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                 chunk_samples = len(chunk)
@@ -302,7 +341,9 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                             full_audio = np.concatenate(audio_buffer)
 
                             if len(full_audio) >= min_speech_samples:
-                                await process_transcription(full_audio, websocket, conversation_history)
+                                processing_task = asyncio.create_task(
+                                    process_transcription(full_audio, websocket, conversation_history)
+                                )
                             else:
                                 print(f"[Silero VAD] 聲音過短 ({len(full_audio)/SAMPLE_RATE:.2f}s)，判定為雜音已忽略")
 
@@ -311,7 +352,6 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                             vad_stream.reset()
                             is_speaking = False
                             silence_samples = 0
-                            await websocket.send_json({"type": "status", "status": "ready"})
                 else:
                     # 介於 neg_threshold 與 threshold 之間（微弱發音或過渡）
                     if not is_speaking:
@@ -323,14 +363,15 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 # 超過最大長度限制 -> 強制處理語音
                 if is_speaking and sum(len(c) for c in audio_buffer) >= max_buffer_samples:
                     full_audio = np.concatenate(audio_buffer)
-                    await process_transcription(full_audio, websocket, conversation_history)
+                    processing_task = asyncio.create_task(
+                        process_transcription(full_audio, websocket, conversation_history)
+                    )
 
                     audio_buffer = []
                     pre_roll_buffer.clear()
                     vad_stream.reset()
                     is_speaking = False
                     silence_samples = 0
-                    await websocket.send_json({"type": "status", "status": "ready"})
 
             elif "text" in message and message["text"]:
                 try:
@@ -347,6 +388,11 @@ async def websocket_stt_endpoint(websocket: WebSocket):
         print(f"[WebSocket] 客戶端斷開連線: {client_info}")
     except Exception as e:
         print(f"[WebSocket] 錯誤發生: {e}")
+    finally:
+        if processing_task is not None:
+            if not processing_task.done():
+                processing_task.cancel()
+            await asyncio.gather(processing_task, return_exceptions=True)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

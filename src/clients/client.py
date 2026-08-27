@@ -62,6 +62,8 @@ OUTPUT_DEVICE_ID = resolve_audio_device(os.getenv("AUDIO_OUTPUT_DEVICE", "pipewi
 
 # 控制播放狀態（播放時靜音麥克風，避免助理聽到自己講話形成迴音）
 is_playing_audio = False
+# 控制完整對話流程狀態（STT 辨識開始後，直到伺服器重新就緒前不接收下一段語音）
+is_processing_turn = False
 
 async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
     """向 TTS 伺服器請求語音並透過喇叭播放"""
@@ -107,7 +109,7 @@ async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
         print("🟢 [準備就緒，請說話...]               ", end="\r", flush=True)
 
 async def audio_stream_client():
-    global is_playing_audio
+    global is_playing_audio, is_processing_turn
     audio_queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
@@ -115,12 +117,22 @@ async def audio_stream_client():
         if status:
             print(f"[音訊警告] {status}", file=sys.stderr)
         
-        # 若正在播放 AI 語音，發送靜音 (避免麥克風錄到喇叭聲音)
-        if is_playing_audio:
+        # 完整流程處理中或播放 AI 語音時，發送靜音避免收進下一輪
+        if is_processing_turn or is_playing_audio:
             silent_chunk = np.zeros_like(indata)
             loop.call_soon_threadsafe(audio_queue.put_nowait, silent_chunk.tobytes())
         else:
             loop.call_soon_threadsafe(audio_queue.put_nowait, indata.tobytes())
+
+    def resume_microphone():
+        """丟棄靜音期間排隊的音訊，再恢復真實收音。"""
+        global is_processing_turn
+        while not audio_queue.empty():
+            try:
+                audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        is_processing_turn = False
 
     print("=" * 65)
     print(" 🎙️  Voice Assistant 語音對話客戶端")
@@ -140,10 +152,14 @@ async def audio_stream_client():
                 async def sender():
                     while True:
                         data = await audio_queue.get()
+                        # 防止切換狀態前已排隊的真實音訊在處理期間送出
+                        if is_processing_turn or is_playing_audio:
+                            data = bytes(len(data))
                         await ws.send(data)
 
                 # 接收辨識結果 Task
                 async def receiver():
+                    global is_processing_turn
                     async for message in ws:
                         try:
                             res = json.loads(message)
@@ -154,11 +170,14 @@ async def audio_stream_client():
                                 if status == "listening" and not is_playing_audio:
                                     print("🔴 [正在說話...]          ", end="\r", flush=True)
                                 elif status == "transcribing":
+                                    is_processing_turn = True
                                     print("⏳ [語音辨識中...]        ", end="\r", flush=True)
                                 elif status == "empty":
                                     print("⚠️  [未辨識出文字，請靠近麥克風再說一次]   ", end="\r", flush=True)
-                                elif status == "ready" and not is_playing_audio:
-                                    print("🟢 [準備就緒，請說話...]  ", end="\r", flush=True)
+                                elif status == "ready":
+                                    resume_microphone()
+                                    if not is_playing_audio:
+                                        print("🟢 [準備就緒，請說話...]  ", end="\r", flush=True)
 
                             elif msg_type == "result":
                                 text = res.get("text", "")

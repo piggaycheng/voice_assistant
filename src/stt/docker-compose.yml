@@ -26,6 +26,14 @@ services:
       - ENABLE_NOISE_SUPPRESSION=true
       - NOISE_REDUCTION_STRENGTH=1.25
       - MAX_NORMALIZATION_GAIN=3.0
+      # sherpa-onnx 關鍵字喚醒設定（聲學比對不含標點）
+      - WAKE_WORD=嘿小奧
+      - WAKE_LISTEN_TIMEOUT=8.0
+      - KWS_NUM_THREADS=2
+      - KWS_MAX_ACTIVE_PATHS=4
+      - KWS_NUM_TRAILING_BLANKS=1
+      - KWS_KEYWORDS_SCORE=1.5
+      - KWS_KEYWORDS_THRESHOLD=0.25
       # OpenAI 相容 LLM 串接設定
       - ENABLE_LLM=true
       - LLM_BASE_URL=http://host.docker.internal:11434/v1

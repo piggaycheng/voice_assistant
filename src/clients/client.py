@@ -175,7 +175,12 @@ async def audio_stream_client():
 
                             if msg_type == "status":
                                 status = res.get("status")
-                                if status == "listening" and not is_playing_audio:
+                                if status == "waiting_wake_word":
+                                    resume_microphone()
+                                    print("💤 [等待喚醒詞：嘿，小奧...]          ", end="\r", flush=True)
+                                elif status == "awakened":
+                                    print("🔔 [已喚醒，請開始說話...]              ", end="\r", flush=True)
+                                elif status == "listening" and not is_playing_audio:
                                     print("🔴 [正在說話...]          ", end="\r", flush=True)
                                 elif status == "transcribing":
                                     is_processing_turn = True

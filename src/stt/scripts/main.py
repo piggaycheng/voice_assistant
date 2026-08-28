@@ -6,6 +6,7 @@ from datetime import date
 
 import numpy as np
 import httpx
+import sherpa_onnx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from faster_whisper import WhisperModel
 from faster_whisper.vad import get_vad_model
@@ -16,6 +17,7 @@ app = FastAPI(title="Faster-Whisper STT & RAG Voice Assistant Server")
 # 全域模型實例
 model: WhisperModel = None
 vad_model = None
+keyword_spotter = None
 
 SAMPLE_RATE = 16000
 VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.35"))          # Silero 人聲判定門檻 (0.35 靈敏捕捉清輔音/弱起音)
@@ -31,6 +33,17 @@ MAX_NORMALIZATION_GAIN = float(os.getenv("MAX_NORMALIZATION_GAIN", "3.0"))
 MAX_COMPRESSION_RATIO = float(os.getenv("MAX_COMPRESSION_RATIO", "2.4"))
 MIN_REPEATED_TEXT_LENGTH = 4
 MIN_REPEATED_TEXT_COUNT = 3
+
+KWS_MODEL_DIR = os.getenv(
+    "KWS_MODEL_DIR",
+    "/app/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
+)
+KWS_KEYWORDS_FILE = os.getenv("KWS_KEYWORDS_FILE", f"{KWS_MODEL_DIR}/keywords.txt")
+KWS_NUM_THREADS = int(os.getenv("KWS_NUM_THREADS", "2"))
+KWS_MAX_ACTIVE_PATHS = int(os.getenv("KWS_MAX_ACTIVE_PATHS", "4"))
+KWS_NUM_TRAILING_BLANKS = int(os.getenv("KWS_NUM_TRAILING_BLANKS", "1"))
+WAKE_WORD = os.getenv("WAKE_WORD", "嘿小奧")
+WAKE_LISTEN_TIMEOUT_SEC = float(os.getenv("WAKE_LISTEN_TIMEOUT", "8.0"))
 
 WHISPER_INITIAL_PROMPT = "繁體中文日常語音對話。公司名稱：盟立、盟立自動化、盟立集團、MiRLE。"
 COMPANY_ALIASES = {
@@ -166,7 +179,7 @@ LLM_SYSTEM_PROMPT = os.getenv(
 
 @app.on_event("startup")
 def load_whisper_model():
-    global model, vad_model
+    global model, vad_model, keyword_spotter
     model_size = os.getenv("WHISPER_MODEL", "small")
     device = os.getenv("WHISPER_DEVICE", "cpu")
     compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
@@ -179,6 +192,7 @@ def load_whisper_model():
     print(f" - Whisper 模型: {model_size} ({device}, {compute_type})")
     print(f" - 儲存路徑: {download_root}")
     print(f" - Silero VAD 門檻: 人聲={VAD_THRESHOLD}, 靜音={VAD_NEG_THRESHOLD}")
+    print(f" - sherpa-onnx 喚醒詞: {WAKE_WORD}")
     print(f" - LLM 串接: {'開啟' if ENABLE_LLM else '關閉'}")
     if ENABLE_LLM:
         print(f" - LLM 位址: {LLM_BASE_URL}")
@@ -189,6 +203,19 @@ def load_whisper_model():
     # 載入 Silero VAD (ONNX)
     vad_model = get_vad_model()
     print("Silero VAD 模型載入完成！")
+
+    keyword_spotter = sherpa_onnx.KeywordSpotter(
+        tokens=f"{KWS_MODEL_DIR}/tokens.txt",
+        encoder=f"{KWS_MODEL_DIR}/encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx",
+        decoder=f"{KWS_MODEL_DIR}/decoder-epoch-13-avg-2-chunk-8-left-64.onnx",
+        joiner=f"{KWS_MODEL_DIR}/joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx",
+        num_threads=KWS_NUM_THREADS,
+        max_active_paths=KWS_MAX_ACTIVE_PATHS,
+        keywords_file=KWS_KEYWORDS_FILE,
+        num_trailing_blanks=KWS_NUM_TRAILING_BLANKS,
+        provider="cpu",
+    )
+    print(f"sherpa-onnx KWS 模型載入完成！喚醒詞：{WAKE_WORD}")
 
     # 載入 Whisper 模型
     model = WhisperModel(
@@ -206,7 +233,8 @@ def index():
         "service": "faster-whisper-stt-websocket",
         "llm_enabled": ENABLE_LLM,
         "llm_backend": "openai-compatible",
-        "llm_model": LLM_MODEL
+        "llm_model": LLM_MODEL,
+        "wake_word": WAKE_WORD,
     }
 
 async def stream_llm_chat(websocket: WebSocket, history: list, user_text: str):
@@ -384,7 +412,7 @@ async def process_turn(full_audio: np.ndarray, websocket: WebSocket, history: li
     try:
         await process_transcription(full_audio, websocket, history)
     finally:
-        await websocket.send_json({"type": "status", "status": "ready"})
+        await websocket.send_json({"type": "status", "status": "waiting_wake_word", "wake_word": WAKE_WORD})
 
 @app.websocket("/ws")
 async def websocket_stt_endpoint(websocket: WebSocket):
@@ -399,15 +427,19 @@ async def websocket_stt_endpoint(websocket: WebSocket):
     consecutive_voice_frames = 0
     silence_samples = 0
     processing_task = None
+    is_awake = False
+    wake_listen_deadline = 0.0
 
     # 建立該連線專屬的 Silero VAD 串流實例（維持獨立 hidden states）
     vad_stream = SileroVADStream(vad_model.session)
+    wake_stream = keyword_spotter.create_stream()
 
     silence_samples_limit = int(SAMPLE_RATE * SILENCE_DURATION_SEC)
     min_speech_samples = int(SAMPLE_RATE * MIN_SPEECH_DURATION_SEC)
     max_buffer_samples = int(SAMPLE_RATE * MAX_BUFFER_SEC)
 
     try:
+        await websocket.send_json({"type": "status", "status": "waiting_wake_word", "wake_word": WAKE_WORD})
         while True:
             message = await websocket.receive()
 
@@ -417,6 +449,8 @@ async def websocket_stt_endpoint(websocket: WebSocket):
             if processing_task is not None and processing_task.done():
                 await processing_task
                 processing_task = None
+                is_awake = False
+                keyword_spotter.reset_stream(wake_stream)
 
             if "bytes" in message and message["bytes"]:
                 if processing_task is not None:
@@ -426,6 +460,37 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                 chunk_samples = len(chunk)
                 if chunk_samples == 0:
+                    continue
+
+                if not is_awake:
+                    wake_stream.accept_waveform(SAMPLE_RATE, chunk)
+                    detected_keyword = ""
+                    while keyword_spotter.is_ready(wake_stream):
+                        keyword_spotter.decode_stream(wake_stream)
+                        detected_keyword = keyword_spotter.get_result(wake_stream)
+                        if detected_keyword:
+                            break
+
+                    if detected_keyword:
+                        keyword_spotter.reset_stream(wake_stream)
+                        vad_stream.reset()
+                        pre_roll_buffer.clear()
+                        audio_buffer = []
+                        is_speaking = False
+                        consecutive_voice_frames = 0
+                        silence_samples = 0
+                        is_awake = True
+                        wake_listen_deadline = asyncio.get_running_loop().time() + WAKE_LISTEN_TIMEOUT_SEC
+                        print(f"[KWS] 偵測到喚醒詞：{WAKE_WORD}")
+                        await websocket.send_json({"type": "status", "status": "awakened", "wake_word": WAKE_WORD})
+                    continue
+
+                if not is_speaking and asyncio.get_running_loop().time() >= wake_listen_deadline:
+                    is_awake = False
+                    vad_stream.reset()
+                    pre_roll_buffer.clear()
+                    print(f"[KWS] 喚醒後 {WAKE_LISTEN_TIMEOUT_SEC:.1f} 秒內未開始說話，返回待命")
+                    await websocket.send_json({"type": "status", "status": "waiting_wake_word", "wake_word": WAKE_WORD})
                     continue
 
                 # 透過 Silero VAD 計算此 chunk 中的人聲機率

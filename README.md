@@ -173,6 +173,10 @@ source .venv/bin/activate
 python3 client.py
 ```
 
+STT 使用 sherpa-onnx KWS 在本機等待喚醒詞。看到「等待喚醒詞」後說「嘿，小奧」，待顯示「已喚醒」再開始提問；若 8 秒內沒有開始說話，會自動回到待命。首次啟動 STT 時會將 KWS 模型下載至 `src/stt/models/`。
+
+喚醒設定可在 `src/stt/docker-compose.yml` 調整：降低 `KWS_KEYWORDS_THRESHOLD` 或提高 `KWS_KEYWORDS_SCORE` 會更容易觸發，但也會增加誤觸機率。修改 `WAKE_WORD` 後重啟 STT，容器會自動重新產生關鍵字 token。
+
 ---
 
 ## 3. 常用管理指令

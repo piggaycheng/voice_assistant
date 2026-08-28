@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: voice-assistant-tts
+    restart: unless-stopped
     ports:
       - "8001:8001"
     volumes:

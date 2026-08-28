@@ -3,6 +3,7 @@ import io
 import sys
 import json
 import asyncio
+import time
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
@@ -15,6 +16,8 @@ TTS_URL = os.getenv("TTS_SERVER_URL", "http://localhost:8001/tts")
 ENABLE_TTS = os.getenv("ENABLE_TTS", "true").lower() in ("true", "1", "yes")
 TTS_VOICE = os.getenv("TTS_VOICE", "zf_xiaoxiao")
 TTS_SPEED = float(os.getenv("TTS_SPEED", "1.0"))
+AUDIO_INPUT_DEVICE = os.getenv("AUDIO_INPUT_DEVICE", "pipewire")
+AUDIO_OUTPUT_DEVICE = os.getenv("AUDIO_OUTPUT_DEVICE", "pipewire")
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -56,16 +59,15 @@ def get_device_label(device_id, kind: str = "input") -> str:
     except Exception:
         return f"[ID: {device_id}]"
 
-# 設定指名使用 PipeWire
-INPUT_DEVICE_ID = resolve_audio_device(os.getenv("AUDIO_INPUT_DEVICE", "pipewire"), kind="input")
-OUTPUT_DEVICE_ID = resolve_audio_device(os.getenv("AUDIO_OUTPUT_DEVICE", "pipewire"), kind="output")
+class AudioStreamUnavailable(Exception):
+    pass
 
 # 控制播放狀態（播放時靜音麥克風，避免助理聽到自己講話形成迴音）
 is_playing_audio = False
 # 控制完整對話流程狀態（STT 辨識開始後，直到伺服器重新就緒前不接收下一段語音）
 is_processing_turn = False
 
-async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
+async def play_tts_audio(text: str):
     """向 TTS 伺服器請求語音並透過喇叭播放"""
     global is_playing_audio
     if not ENABLE_TTS or not text.strip():
@@ -95,8 +97,10 @@ async def play_tts_audio(text: str, loop: asyncio.AbstractEventLoop):
         print(f"🔊 [AI 語音播放中 ({len(audio_data)/sample_rate:.1f}s)...]          ", end="\r", flush=True)
 
         # 播放音訊並等待播放完成（指定 Output Device）
-        sd.play(audio_data, sample_rate, device=OUTPUT_DEVICE_ID)
-        await loop.run_in_executor(None, sd.wait)
+        output_device_id = resolve_audio_device(AUDIO_OUTPUT_DEVICE, kind="output")
+        sd.play(audio_data, sample_rate, device=output_device_id)
+        await asyncio.to_thread(sd.wait)
+        print(f"\n✅ [AI 語音播放完成 ({len(audio_data)/sample_rate:.1f}s)]")
 
     except httpx.ConnectError:
         print(f"\n⚠️  [TTS 連線失敗] 無法連線至 {TTS_URL}，請確認 TTS 容器是否已啟動。")
@@ -112,8 +116,11 @@ async def audio_stream_client():
     global is_playing_audio, is_processing_turn
     audio_queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    last_audio_callback_at = time.monotonic()
 
-    def audio_callback(indata, frames, time, status):
+    def audio_callback(indata, frames, callback_time, status):
+        nonlocal last_audio_callback_at
+        last_audio_callback_at = time.monotonic()
         if status:
             print(f"[音訊警告] {status}", file=sys.stderr)
         
@@ -139,13 +146,14 @@ async def audio_stream_client():
     print(f" 🔗 STT 伺服器: {SERVER_URI}")
     print(f" 🔊 TTS 伺服器: {TTS_URL} (語音: {TTS_VOICE}, 語速: {TTS_SPEED})")
     print(f" ⚙️  TTS 語音播放: {'開啟' if ENABLE_TTS else '關閉'}")
-    print(f" 🎤 麥克風 (Input):  {get_device_label(INPUT_DEVICE_ID, kind='input')}")
-    print(f" 🔈 喇叭 (Output):   {get_device_label(OUTPUT_DEVICE_ID, kind='output')}")
+    print(f" 🎤 麥克風 (Input):  {get_device_label(resolve_audio_device(AUDIO_INPUT_DEVICE, kind='input'), kind='input')}")
+    print(f" 🔈 喇叭 (Output):   {get_device_label(resolve_audio_device(AUDIO_OUTPUT_DEVICE, kind='output'), kind='output')}")
     print("=" * 65)
 
     while True:
         try:
             async with websockets.connect(SERVER_URI) as ws:
+                resume_microphone()
                 print("✅ 成功連線至語音助理伺服器！請對著麥克風說話（按 Ctrl+C 結束）...\n")
 
                 # 發送音訊 Task
@@ -196,7 +204,7 @@ async def audio_stream_client():
                                 print("\n")
                                 # 觸發 Kokoro TTS 語音播放
                                 if ENABLE_TTS and full_reply:
-                                    await play_tts_audio(full_reply, loop)
+                                    await play_tts_audio(full_reply)
                                 else:
                                     print("🟢 [準備就緒，請說話...]", end="\r", flush=True)
 
@@ -208,22 +216,43 @@ async def audio_stream_client():
                         except Exception as e:
                             print(f"\n[解析回應錯誤] {e}")
 
+                async def audio_watchdog(input_stream):
+                    while True:
+                        await asyncio.sleep(1)
+                        callback_age = time.monotonic() - last_audio_callback_at
+                        if not input_stream.active or callback_age > 2.0:
+                            raise AudioStreamUnavailable(
+                                f"麥克風音訊串流中斷（{callback_age:.1f} 秒未收到資料）"
+                            )
+
                 # 啟動麥克風錄音串流 (指名 Input Device)
+                input_device_id = resolve_audio_device(AUDIO_INPUT_DEVICE, kind="input")
+                last_audio_callback_at = time.monotonic()
                 with sd.InputStream(
-                    device=INPUT_DEVICE_ID,
+                    device=input_device_id,
                     samplerate=SAMPLE_RATE,
                     channels=CHANNELS,
                     dtype="int16",
                     blocksize=CHUNK_SIZE,
                     callback=audio_callback,
-                ):
+                ) as input_stream:
                     sender_task = asyncio.create_task(sender())
                     receiver_task = asyncio.create_task(receiver())
-                    await asyncio.gather(sender_task, receiver_task)
+                    watchdog_task = asyncio.create_task(audio_watchdog(input_stream))
+                    try:
+                        await asyncio.gather(sender_task, receiver_task, watchdog_task)
+                    finally:
+                        sender_task.cancel()
+                        receiver_task.cancel()
+                        watchdog_task.cancel()
+                        await asyncio.gather(sender_task, receiver_task, watchdog_task, return_exceptions=True)
 
         except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError):
             print(f"⚠️  無法連線至 {SERVER_URI}，5 秒後嘗試重連...")
             await asyncio.sleep(5)
+        except (AudioStreamUnavailable, sd.PortAudioError) as error:
+            print(f"\n⚠️  [音訊裝置中斷] {error}，2 秒後重新偵測裝置...")
+            await asyncio.sleep(2)
         except asyncio.CancelledError:
             break
         except KeyboardInterrupt:

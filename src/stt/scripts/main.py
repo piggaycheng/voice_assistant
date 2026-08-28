@@ -28,6 +28,9 @@ CONSECUTIVE_FRAMES_TRIGGER = int(os.getenv("CONSECUTIVE_FRAMES", "1")) # 1 幀�
 ENABLE_NOISE_SUPPRESSION = os.getenv("ENABLE_NOISE_SUPPRESSION", "true").lower() in ("true", "1", "yes")
 NOISE_REDUCTION_STRENGTH = float(os.getenv("NOISE_REDUCTION_STRENGTH", "1.25"))
 MAX_NORMALIZATION_GAIN = float(os.getenv("MAX_NORMALIZATION_GAIN", "3.0"))
+MAX_COMPRESSION_RATIO = float(os.getenv("MAX_COMPRESSION_RATIO", "2.4"))
+MIN_REPEATED_TEXT_LENGTH = 4
+MIN_REPEATED_TEXT_COUNT = 3
 
 WHISPER_INITIAL_PROMPT = "繁體中文日常語音對話。公司名稱：盟立、盟立自動化、盟立集團、MiRLE。"
 COMPANY_ALIASES = {
@@ -40,6 +43,22 @@ def normalize_company_aliases(text: str) -> str:
     for alias, canonical_name in COMPANY_ALIASES.items():
         text = text.replace(alias, canonical_name)
     return text
+
+def has_repeated_text_loop(text: str) -> bool:
+    normalized_text = "".join(character for character in text if character.isalnum())
+    max_unit_length = min(40, len(normalized_text) // MIN_REPEATED_TEXT_COUNT)
+
+    for start_index in range(len(normalized_text)):
+        for unit_length in range(MIN_REPEATED_TEXT_LENGTH, max_unit_length + 1):
+            unit = normalized_text[start_index:start_index + unit_length]
+            if len(unit) < unit_length:
+                break
+
+            repeated_text = unit * MIN_REPEATED_TEXT_COUNT
+            if normalized_text.startswith(repeated_text, start_index):
+                return True
+
+    return False
 
 def suppress_stationary_noise(audio: np.ndarray) -> np.ndarray:
     """以較安靜音框估計固定背景噪音，使用頻譜閘門降低空調、風扇及底噪。"""
@@ -333,9 +352,15 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
         if s.avg_logprob < -1.0:
             print(f"[STT 忽略] 置信度過低 (avg_logprob={s.avg_logprob:.2f}): '{s.text}'")
             continue
+        if s.compression_ratio > MAX_COMPRESSION_RATIO:
+            print(f"[STT 忽略] 文字重複率過高 (compression_ratio={s.compression_ratio:.2f}): '{s.text}'")
+            continue
         valid_segments.append(s.text.strip())
 
     raw_text = "".join(valid_segments).strip()
+    if has_repeated_text_loop(raw_text):
+        print(f"[STT 忽略] 偵測到重複文字迴圈: '{raw_text}'")
+        raw_text = ""
     text = normalize_company_aliases(raw_text)
 
     if text:
@@ -354,6 +379,12 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
     else:
         print("[STT] 未辨識出有效文字（已過濾雜音/幻覺）")
         await websocket.send_json({"type": "status", "status": "empty"})
+
+async def process_turn(full_audio: np.ndarray, websocket: WebSocket, history: list):
+    try:
+        await process_transcription(full_audio, websocket, history)
+    finally:
+        await websocket.send_json({"type": "status", "status": "ready"})
 
 @app.websocket("/ws")
 async def websocket_stt_endpoint(websocket: WebSocket):
@@ -386,7 +417,6 @@ async def websocket_stt_endpoint(websocket: WebSocket):
             if processing_task is not None and processing_task.done():
                 await processing_task
                 processing_task = None
-                await websocket.send_json({"type": "status", "status": "ready"})
 
             if "bytes" in message and message["bytes"]:
                 if processing_task is not None:
@@ -433,7 +463,7 @@ async def websocket_stt_endpoint(websocket: WebSocket):
 
                             if len(full_audio) >= min_speech_samples:
                                 processing_task = asyncio.create_task(
-                                    process_transcription(full_audio, websocket, conversation_history)
+                                    process_turn(full_audio, websocket, conversation_history)
                                 )
                             else:
                                 print(f"[Silero VAD] 聲音過短 ({len(full_audio)/SAMPLE_RATE:.2f}s)，判定為雜音已忽略")
@@ -455,7 +485,7 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 if is_speaking and sum(len(c) for c in audio_buffer) >= max_buffer_samples:
                     full_audio = np.concatenate(audio_buffer)
                     processing_task = asyncio.create_task(
-                        process_transcription(full_audio, websocket, conversation_history)
+                        process_turn(full_audio, websocket, conversation_history)
                     )
 
                     audio_buffer = []

@@ -25,6 +25,9 @@ MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.4")) # 最�
 MAX_BUFFER_SEC = 20.0  # 單次發話最大上限長度 (秒)
 PRE_ROLL_CHUNKS = int(os.getenv("PRE_ROLL_CHUNKS", "14")) # 前置音訊緩衝 (14 chunks = 700ms，完整保留開頭發音與自然聲學上下文)
 CONSECUTIVE_FRAMES_TRIGGER = int(os.getenv("CONSECUTIVE_FRAMES", "1")) # 1 幀達標即觸發錄音，零延遲響應
+ENABLE_NOISE_SUPPRESSION = os.getenv("ENABLE_NOISE_SUPPRESSION", "true").lower() in ("true", "1", "yes")
+NOISE_REDUCTION_STRENGTH = float(os.getenv("NOISE_REDUCTION_STRENGTH", "1.25"))
+MAX_NORMALIZATION_GAIN = float(os.getenv("MAX_NORMALIZATION_GAIN", "3.0"))
 
 WHISPER_INITIAL_PROMPT = "繁體中文日常語音對話。公司名稱：盟立、盟立自動化、盟立集團、MiRLE。"
 COMPANY_ALIASES = {
@@ -37,6 +40,44 @@ def normalize_company_aliases(text: str) -> str:
     for alias, canonical_name in COMPANY_ALIASES.items():
         text = text.replace(alias, canonical_name)
     return text
+
+def suppress_stationary_noise(audio: np.ndarray) -> np.ndarray:
+    """以較安靜音框估計固定背景噪音，使用頻譜閘門降低空調、風扇及底噪。"""
+    frame_size = 512
+    hop_size = frame_size // 2
+    if len(audio) < frame_size:
+        return audio
+
+    original_length = len(audio)
+    edge_padding = frame_size // 2
+    padded_audio = np.pad(audio, (edge_padding, edge_padding), mode="reflect")
+    padded_length = frame_size + int(np.ceil((len(padded_audio) - frame_size) / hop_size)) * hop_size
+    padded_audio = np.pad(padded_audio, (0, padded_length - len(padded_audio)))
+    window = np.hanning(frame_size).astype(np.float32)
+    frame_starts = range(0, padded_length - frame_size + 1, hop_size)
+    spectra = np.stack([
+        np.fft.rfft(padded_audio[start:start + frame_size] * window)
+        for start in frame_starts
+    ])
+
+    magnitudes = np.abs(spectra)
+    noise_floor = np.percentile(magnitudes, 20, axis=0)
+    retained_magnitude = np.maximum(
+        magnitudes - NOISE_REDUCTION_STRENGTH * noise_floor,
+        magnitudes * 0.12,
+    )
+    filtered_spectra = spectra * retained_magnitude / np.maximum(magnitudes, 1e-8)
+
+    output = np.zeros(padded_length, dtype=np.float32)
+    window_sum = np.zeros(padded_length, dtype=np.float32)
+    for frame_index, start in enumerate(frame_starts):
+        filtered_frame = np.fft.irfft(filtered_spectra[frame_index], n=frame_size).astype(np.float32)
+        output[start:start + frame_size] += filtered_frame * window
+        window_sum[start:start + frame_size] += window * window
+
+    valid = window_sum > 1e-6
+    output[valid] /= window_sum[valid]
+    return np.clip(output[edge_padding:edge_padding + original_length], -1.0, 1.0)
 
 class SileroVADStream:
     """即時串流 Silero VAD (基於 ONNX)，維持每個連線獨立的 hidden state 與 context"""
@@ -190,7 +231,10 @@ async def stream_llm_chat(websocket: WebSocket, history: list, user_text: str):
         "messages": messages,
         "temperature": 0.0,
         "stream": True,
-        "max_tokens": 8192
+        "max_tokens": 256,
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+        },
     }
     headers = {"Authorization": f"Bearer {LLM_API_KEY}"}
 
@@ -251,8 +295,13 @@ async def process_transcription(full_audio: np.ndarray, websocket: WebSocket, hi
         await websocket.send_json({"type": "status", "status": "empty"})
         return
 
-    # 音量適度正規化（避免爆音與過度放大）
-    full_audio = full_audio / max_val * 0.90
+    if ENABLE_NOISE_SUPPRESSION:
+        full_audio = suppress_stationary_noise(full_audio)
+
+    # 限制增益，避免將現場底噪或遠處談話強制放大
+    filtered_max = float(np.max(np.abs(full_audio)))
+    normalization_gain = min(0.90 / max(filtered_max, 1e-8), MAX_NORMALIZATION_GAIN)
+    full_audio = full_audio * normalization_gain
 
     audio_duration = round(len(full_audio) / SAMPLE_RATE, 2)
     print(f"[STT] 說話結束，開始辨識 ({audio_duration} 秒音訊)...")

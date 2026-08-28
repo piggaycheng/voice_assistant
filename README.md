@@ -26,7 +26,7 @@ docker compose -f src/stt/docker-compose.yml up -d
 
 ### RAG API
 
-RAG 服務只負責建立向量索引與檢索內容，不會直接呼叫 LLM。STT 會將 `/query` 回傳的 `matches` 組成參考資料，再直接呼叫 `11434` 的 OpenAI 相容 LLM API 產生回答。
+RAG 服務使用向量搜尋與 BM25 中文關鍵字搜尋召回候選，以 RRF 融合後交由 cross-encoder 重新排序，不會直接呼叫 LLM。STT 會將 `/query` 回傳的 `matches` 組成參考資料，再直接呼叫 `11434` 的 OpenAI 相容 LLM API 產生回答。
 
 ```bash
 docker compose -f src/rag/docker-compose.yml up -d

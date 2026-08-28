@@ -23,3 +23,7 @@ src/llm/gguf_models/
 
 # env file
 .env
+
+# RAG
+chroma_db/
+wiki_data/

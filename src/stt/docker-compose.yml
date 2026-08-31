@@ -19,6 +19,7 @@ services:
       - HF_HOME=/app/models
       - VAD_THRESHOLD=0.35
       - VAD_NEG_THRESHOLD=0.20
+      - RMS_START_THRESHOLD_DBFS=-35.0
       - PRE_ROLL_CHUNKS=14
       - SILENCE_DURATION=0.8
       - MIN_SPEECH_DURATION=0.4

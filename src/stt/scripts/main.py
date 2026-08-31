@@ -22,6 +22,7 @@ keyword_spotter = None
 SAMPLE_RATE = 16000
 VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.35"))          # Silero 人聲判定門檻 (0.35 靈敏捕捉清輔音/弱起音)
 VAD_NEG_THRESHOLD = float(os.getenv("VAD_NEG_THRESHOLD", "0.20")) # 靜音/非人聲判定門檻 (0.20 避免句中氣音被過早切斷)
+RMS_START_THRESHOLD_DBFS = float(os.getenv("RMS_START_THRESHOLD_DBFS", "-35.0")) # 開始錄音所需的短窗 RMS 音量
 SILENCE_DURATION_SEC = float(os.getenv("SILENCE_DURATION", "0.8")) # 停頓多久視為說話結束 (秒)
 MIN_SPEECH_DURATION_SEC = float(os.getenv("MIN_SPEECH_DURATION", "0.4")) # 最小發話長度 (小於此長度視為雜音忽略)
 MAX_BUFFER_SEC = 20.0  # 單次發話最大上限長度 (秒)
@@ -51,6 +52,12 @@ COMPANY_ALIASES = {
     "猛力": "盟立",
     "盟力": "盟立",
 }
+
+def calculate_rms_dbfs(audio: np.ndarray) -> float:
+    if audio.size == 0:
+        return float("-inf")
+    rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
+    return 20.0 * np.log10(max(rms, 1e-12))
 
 def normalize_company_aliases(text: str) -> str:
     for alias, canonical_name in COMPANY_ALIASES.items():
@@ -192,6 +199,7 @@ def load_whisper_model():
     print(f" - Whisper 模型: {model_size} ({device}, {compute_type})")
     print(f" - 儲存路徑: {download_root}")
     print(f" - Silero VAD 門檻: 人聲={VAD_THRESHOLD}, 靜音={VAD_NEG_THRESHOLD}")
+    print(f" - 錄音啟動 RMS 門檻: {RMS_START_THRESHOLD_DBFS:.1f} dBFS")
     print(f" - sherpa-onnx 喚醒詞: {WAKE_WORD}")
     print(f" - LLM 串接: {'開啟' if ENABLE_LLM else '關閉'}")
     if ENABLE_LLM:
@@ -498,12 +506,19 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                 speech_prob = max(probs) if probs else 0.0
 
                 if speech_prob >= VAD_THRESHOLD:
-                    consecutive_voice_frames += 1
-
                     if not is_speaking:
+                        rms_dbfs = calculate_rms_dbfs(chunk)
+                        if rms_dbfs >= RMS_START_THRESHOLD_DBFS:
+                            consecutive_voice_frames += 1
+                        else:
+                            consecutive_voice_frames = 0
+
                         if consecutive_voice_frames >= CONSECUTIVE_FRAMES_TRIGGER:
                             is_speaking = True
-                            print(f"[Silero VAD] 偵測到人聲 (機率={speech_prob:.2f})，開始錄音...")
+                            print(
+                                f"[Silero VAD] 偵測到有效人聲 "
+                                f"(機率={speech_prob:.2f}, RMS={rms_dbfs:.1f} dBFS)，開始錄音..."
+                            )
                             await websocket.send_json({"type": "status", "status": "listening"})
                             audio_buffer.extend(list(pre_roll_buffer))
                             pre_roll_buffer.clear()

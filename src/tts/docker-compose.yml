@@ -10,6 +10,7 @@ services:
     volumes:
       # 將 host 當前目錄 (src/tts) mount 到容器內 /app（包含 .venv、models 與程式碼）
       - .:/app
+      - ./output:/app/output
     environment:
       - PYTHONUNBUFFERED=1
       - TTS_PORT=8001
@@ -17,6 +18,12 @@ services:
       - TTS_DEFAULT_LANG=z
       - TTS_DEFAULT_VOICE=zf_xiaoxiao
       - TTS_DEFAULT_SPEED=1.0
+      - TTS_OUTPUT_FOLDER=/app/output
+      # 必須改成外部設備可連線的主機 IP，例如 http://192.168.1.10:8001
+      - TTS_PUBLIC_BASE_URL=${TTS_PUBLIC_BASE_URL:-http://localhost:8001}
+      # 外部設備音檔播放 API，例如 http://192.168.1.100:80/apiRequest
+      - EXTERNAL_DEVICE_API_URL=${EXTERNAL_DEVICE_API_URL:-}
+      - EXTERNAL_DEVICE_API_TIMEOUT=10
       - HF_HOME=/app/models
     extra_hosts:
       - "host.docker.internal:host-gateway"

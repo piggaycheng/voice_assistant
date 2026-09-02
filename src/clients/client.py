@@ -180,7 +180,8 @@ async def audio_stream_client():
                                     print("💤 [等待喚醒詞：嘿，小奧...]          ", end="\r", flush=True)
                                 elif status == "awakened":
                                     print("🔔 [已喚醒，請開始說話...]              ", end="\r", flush=True)
-                                    await play_tts_audio(res.get("ack_text", "請說"))
+                                    if res.get("voice_output_mode", "client") == "client":
+                                        await play_tts_audio(res.get("ack_text", "請說"))
                                 elif status == "listening" and not is_playing_audio:
                                     print("🔴 [正在說話...]          ", end="\r", flush=True)
                                 elif status == "transcribing":
@@ -209,7 +210,11 @@ async def audio_stream_client():
                                 full_reply = res.get("text", "")
                                 print("\n")
                                 # 觸發 Kokoro TTS 語音播放
-                                if ENABLE_TTS and full_reply:
+                                if (
+                                    ENABLE_TTS
+                                    and full_reply
+                                    and res.get("voice_output_mode", "client") == "client"
+                                ):
                                     await play_tts_audio(full_reply)
                                 else:
                                     print("🟢 [準備就緒，請說話...]", end="\r", flush=True)

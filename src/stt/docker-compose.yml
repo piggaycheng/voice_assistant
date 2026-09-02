@@ -44,6 +44,15 @@ services:
       - RAG_BASE_URL=http://host.docker.internal:8003
       - RAG_TOP_K=3
       - RAG_TIMEOUT=10
+      # client（預設本機播放）、external_text（設備合成）、external_audio（Kokoro MP3）
+      - VOICE_OUTPUT_MODE=${VOICE_OUTPUT_MODE:-client}
+      - TTS_SERVER_URL=http://host.docker.internal:8001/tts
+      - TTS_VOICE=zf_xiaoxiao
+      - TTS_SPEED=1.0
+      - TTS_TIMEOUT=180
+      # 外部設備文字 TTS API，例如 http://192.168.1.100:80/apiRequest
+      - EXTERNAL_DEVICE_API_URL=${EXTERNAL_DEVICE_API_URL:-}
+      - EXTERNAL_DEVICE_API_TIMEOUT=10
     extra_hosts:
       - "host.docker.internal:host-gateway"
     stdin_open: true

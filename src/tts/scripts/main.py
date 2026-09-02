@@ -2,11 +2,15 @@ import os
 import io
 import json
 import asyncio
+import subprocess
+import uuid
 from typing import Optional, List, Dict
 import numpy as np
 import soundfile as sf
+import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import Response, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 from kokoro import KPipeline
@@ -24,6 +28,13 @@ DEFAULT_LANG = os.getenv("TTS_DEFAULT_LANG", "z")       # 預設繁中/簡中 ('
 DEFAULT_VOICE = os.getenv("TTS_DEFAULT_VOICE", "zf_xiaoxiao")
 DEFAULT_SPEED = float(os.getenv("TTS_DEFAULT_SPEED", "1.0"))
 SAMPLE_RATE = 24000
+OUTPUT_FOLDER = os.getenv("TTS_OUTPUT_FOLDER", "/app/output")
+TTS_PUBLIC_BASE_URL = os.getenv("TTS_PUBLIC_BASE_URL", "http://localhost:8001").rstrip("/")
+EXTERNAL_DEVICE_API_URL = os.getenv("EXTERNAL_DEVICE_API_URL", "")
+EXTERNAL_DEVICE_API_TIMEOUT = float(os.getenv("EXTERNAL_DEVICE_API_TIMEOUT", "10"))
+
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+app.mount("/output", StaticFiles(directory=OUTPUT_FOLDER), name="output")
 
 # 支援的語音清單與說明
 SUPPORTED_VOICES: Dict[str, Dict[str, str]] = {
@@ -108,8 +119,41 @@ class TTSRequest(BaseModel):
     lang_code: Optional[str] = None
     speed: Optional[float] = None
     response_format: Optional[str] = "wav"
+    delivery: Optional[str] = "client"
 
-def synthesize_audio_sync(text: str, voice: str, lang_code: str, speed: float) -> bytes:
+async def post_audio_to_external_device(audio_url: str):
+    """通知外部設備下載並播放已產生的 MP3。"""
+    if not EXTERNAL_DEVICE_API_URL:
+        print("[外部設備] 未設定 EXTERNAL_DEVICE_API_URL，略過音檔通知")
+        return
+
+    # TODO: 取得設備 API 的正式規格後，在此調整 JSON 欄位。
+    payload = {
+        "type": "audio",
+        "url": audio_url,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=EXTERNAL_DEVICE_API_TIMEOUT) as client:
+            response = await client.post(EXTERNAL_DEVICE_API_URL, json=payload)
+            response.raise_for_status()
+        print(f"[外部設備] 已送出音檔通知: {audio_url}")
+    except httpx.HTTPError as error:
+        print(f"[外部設備錯誤] 音檔通知失敗: {type(error).__name__}: {error}")
+
+def create_mp3_destination() -> tuple[str, str]:
+    filename = f"speech-{uuid.uuid4().hex}.mp3"
+    output_path = os.path.join(OUTPUT_FOLDER, filename)
+    public_url = f"{TTS_PUBLIC_BASE_URL}/output/{filename}"
+    return output_path, public_url
+
+def synthesize_audio_sync(
+    text: str,
+    voice: str,
+    lang_code: str,
+    speed: float,
+    mp3_output_path: Optional[str] = None,
+) -> bytes:
     """同步執行 Kokoro TTS 語音生成並轉為 WAV 二進位資料"""
     pipeline = get_or_create_pipeline(lang_code)
     generator = pipeline(text, voice=voice, speed=speed)
@@ -125,6 +169,26 @@ def synthesize_audio_sync(text: str, voice: str, lang_code: str, speed: float) -
     full_audio = np.concatenate(audio_chunks)
     buffer = io.BytesIO()
     sf.write(buffer, full_audio, SAMPLE_RATE, format="WAV")
+
+    if mp3_output_path:
+        temporary_wav_path = f"{mp3_output_path}.tmp.wav"
+        try:
+            sf.write(temporary_wav_path, full_audio, SAMPLE_RATE, format="WAV")
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-i", temporary_wav_path,
+                    "-codec:a", "libmp3lame", "-b:a", "128k",
+                    mp3_output_path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            if os.path.exists(temporary_wav_path):
+                os.remove(temporary_wav_path)
+
     return buffer.getvalue()
 
 @app.get("/")
@@ -160,7 +224,8 @@ async def get_tts(
     text: str = Query(..., description="要合成的文字內容"),
     voice: Optional[str] = Query(None, description="語音名稱，如 zf_xiaoxiao, af_heart"),
     lang: Optional[str] = Query(None, description="語言代號，如 z, a, b, j"),
-    speed: Optional[float] = Query(None, description="語速倍率 (預設 1.0)")
+    speed: Optional[float] = Query(None, description="語速倍率 (預設 1.0)"),
+    delivery: str = Query("client", description="client 或 external_audio"),
 ):
     """GET 介面：方便透過瀏覽器網址或 curl 直接播放與測試"""
     if not text.strip():
@@ -169,6 +234,10 @@ async def get_tts(
     target_voice = voice or DEFAULT_VOICE
     target_lang = infer_lang_code(target_voice, lang)
     target_speed = speed if speed is not None else DEFAULT_SPEED
+    mp3_output_path = None
+    audio_url = None
+    if delivery == "external_audio":
+        mp3_output_path, audio_url = create_mp3_destination()
 
     try:
         loop = asyncio.get_running_loop()
@@ -178,9 +247,17 @@ async def get_tts(
             text,
             target_voice,
             target_lang,
-            target_speed
+            target_speed,
+            mp3_output_path,
         )
-        return Response(content=wav_bytes, media_type="audio/wav")
+        if audio_url:
+            await post_audio_to_external_device(audio_url)
+        headers = {"X-External-Audio-URL": audio_url} if audio_url else None
+        return Response(
+            content=wav_bytes,
+            media_type="audio/wav",
+            headers=headers,
+        )
     except Exception as e:
         print(f"[TTS 錯誤] {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -196,6 +273,10 @@ async def post_tts(req: TTSRequest):
     target_voice = req.voice or DEFAULT_VOICE
     target_lang = infer_lang_code(target_voice, req.lang_code)
     target_speed = req.speed if req.speed is not None else DEFAULT_SPEED
+    mp3_output_path = None
+    audio_url = None
+    if req.delivery == "external_audio":
+        mp3_output_path, audio_url = create_mp3_destination()
 
     try:
         loop = asyncio.get_running_loop()
@@ -205,12 +286,18 @@ async def post_tts(req: TTSRequest):
             raw_text,
             target_voice,
             target_lang,
-            target_speed
+            target_speed,
+            mp3_output_path,
         )
+        if audio_url:
+            await post_audio_to_external_device(audio_url)
+        headers = {"Content-Disposition": "inline; filename=speech.wav"}
+        if audio_url:
+            headers["X-External-Audio-URL"] = audio_url
         return Response(
             content=wav_bytes,
             media_type="audio/wav",
-            headers={"Content-Disposition": "inline; filename=speech.wav"}
+            headers=headers,
         )
     except Exception as e:
         print(f"[TTS 錯誤] {e}")
@@ -247,6 +334,10 @@ async def websocket_tts_endpoint(websocket: WebSocket):
                 target_voice = data.get("voice") or DEFAULT_VOICE
                 target_lang = infer_lang_code(target_voice, data.get("lang_code"))
                 target_speed = float(data.get("speed", DEFAULT_SPEED))
+                mp3_output_path = None
+                audio_url = None
+                if data.get("delivery") == "external_audio":
+                    mp3_output_path, audio_url = create_mp3_destination()
 
                 await websocket.send_json({
                     "type": "status",
@@ -263,12 +354,19 @@ async def websocket_tts_endpoint(websocket: WebSocket):
                         raw_text,
                         target_voice,
                         target_lang,
-                        target_speed
+                        target_speed,
+                        mp3_output_path,
                     )
+                    if audio_url:
+                        await post_audio_to_external_device(audio_url)
                     # 先發送二進位音訊資料
                     await websocket.send_bytes(wav_bytes)
                     # 再發送完成通知
-                    await websocket.send_json({"type": "done", "sample_rate": SAMPLE_RATE})
+                    await websocket.send_json({
+                        "type": "done",
+                        "sample_rate": SAMPLE_RATE,
+                        "audio_url": audio_url,
+                    })
                 except Exception as e:
                     print(f"[WebSocket-TTS 錯誤] {e}")
                     await websocket.send_json({"type": "error", "error": str(e)})

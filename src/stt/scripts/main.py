@@ -159,6 +159,16 @@ LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))
 RAG_BASE_URL = os.getenv("RAG_BASE_URL", "http://host.docker.internal:8003")
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
 RAG_TIMEOUT = float(os.getenv("RAG_TIMEOUT", "10"))
+VOICE_OUTPUT_MODE = os.getenv("VOICE_OUTPUT_MODE", "client").strip().lower()
+if VOICE_OUTPUT_MODE not in {"client", "external_text", "external_audio"}:
+    print(f"[語音輸出] 無效模式 '{VOICE_OUTPUT_MODE}'，改用 client")
+    VOICE_OUTPUT_MODE = "client"
+TTS_SERVER_URL = os.getenv("TTS_SERVER_URL", "http://host.docker.internal:8001/tts")
+TTS_VOICE = os.getenv("TTS_VOICE", "zf_xiaoxiao")
+TTS_SPEED = float(os.getenv("TTS_SPEED", "1.0"))
+TTS_TIMEOUT = float(os.getenv("TTS_TIMEOUT", "180"))
+EXTERNAL_DEVICE_API_URL = os.getenv("EXTERNAL_DEVICE_API_URL", "")
+EXTERNAL_DEVICE_API_TIMEOUT = float(os.getenv("EXTERNAL_DEVICE_API_TIMEOUT", "10"))
 LLM_SYSTEM_PROMPT = os.getenv(
     "LLM_SYSTEM_PROMPT",
     """你是盟立官方知識庫語音助理。只能依據提供的參考資料回答，不得使用模型記憶補充、推測或虛構資訊。
@@ -236,7 +246,52 @@ def index():
         "llm_backend": "openai-compatible",
         "llm_model": LLM_MODEL,
         "wake_word": WAKE_WORD,
+        "voice_output_mode": VOICE_OUTPUT_MODE,
     }
+
+async def post_text_to_external_device(text: str, event: str):
+    """將喚醒回覆或 LLM 回覆以 JSON POST 至外部設備。"""
+    if not EXTERNAL_DEVICE_API_URL:
+        print("[外部設備] 未設定 EXTERNAL_DEVICE_API_URL，略過文字通知")
+        return
+
+    # TODO: 取得設備 API 的正式規格後，在此調整 JSON 欄位。
+    payload = {
+        "type": "text",
+        "event": event,
+        "text": text,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=EXTERNAL_DEVICE_API_TIMEOUT) as client:
+            response = await client.post(EXTERNAL_DEVICE_API_URL, json=payload)
+            response.raise_for_status()
+        print(f"[外部設備] 已送出文字通知 ({event})")
+    except httpx.HTTPError as error:
+        print(f"[外部設備錯誤] 文字通知失敗: {type(error).__name__}: {error}")
+
+async def send_voice_output(text: str, event: str):
+    """依語音輸出模式將文字交給外部設備或 TTS 服務。"""
+    if not text.strip() or VOICE_OUTPUT_MODE == "client":
+        return
+
+    if VOICE_OUTPUT_MODE == "external_text":
+        await post_text_to_external_device(text, event)
+        return
+
+    payload = {
+        "text": text,
+        "voice": TTS_VOICE,
+        "speed": TTS_SPEED,
+        "delivery": "external_audio",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=TTS_TIMEOUT) as client:
+            response = await client.post(TTS_SERVER_URL, json=payload)
+            response.raise_for_status()
+        print(f"[語音輸出] TTS 已產生外部音檔 ({event})")
+    except httpx.HTTPError as error:
+        print(f"[語音輸出錯誤] TTS 請求失敗: {type(error).__name__}: {error}")
 
 async def stream_llm_chat(websocket: WebSocket, history: list, user_text: str):
     """檢索 RAG 後將使用者文字送往 LLM，並串流回傳回答"""
@@ -325,7 +380,12 @@ async def stream_llm_chat(websocket: WebSocket, history: list, user_text: str):
         if complete_reply:
             history.append({"role": "assistant", "content": complete_reply})
             print(f"[LLM 回覆完成] {complete_reply}")
-        await websocket.send_json({"type": "llm_end", "text": complete_reply})
+            await send_voice_output(complete_reply, "llm_reply")
+        await websocket.send_json({
+            "type": "llm_end",
+            "text": complete_reply,
+            "voice_output_mode": VOICE_OUTPUT_MODE,
+        })
 
     except WebSocketDisconnect:
         raise
@@ -488,7 +548,9 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                             "status": "awakened",
                             "wake_word": WAKE_WORD,
                             "ack_text": WAKE_ACK_TEXT,
+                            "voice_output_mode": VOICE_OUTPUT_MODE,
                         })
+                        await send_voice_output(WAKE_ACK_TEXT, "wake_ack")
                     continue
 
                 if not is_speaking and asyncio.get_running_loop().time() >= wake_listen_deadline:

@@ -27,3 +27,6 @@ src/llm/gguf_models/
 # RAG
 chroma_db/
 wiki_data/
+
+# Generated TTS audio
+src/tts/output/

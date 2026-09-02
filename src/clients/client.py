@@ -180,6 +180,7 @@ async def audio_stream_client():
                                     print("💤 [等待喚醒詞：嘿，小奧...]          ", end="\r", flush=True)
                                 elif status == "awakened":
                                     print("🔔 [已喚醒，請開始說話...]              ", end="\r", flush=True)
+                                    await play_tts_audio(res.get("ack_text", "請說"))
                                 elif status == "listening" and not is_playing_audio:
                                     print("🔴 [正在說話...]          ", end="\r", flush=True)
                                 elif status == "transcribing":

@@ -43,6 +43,7 @@ KWS_NUM_THREADS = int(os.getenv("KWS_NUM_THREADS", "2"))
 KWS_MAX_ACTIVE_PATHS = int(os.getenv("KWS_MAX_ACTIVE_PATHS", "4"))
 KWS_NUM_TRAILING_BLANKS = int(os.getenv("KWS_NUM_TRAILING_BLANKS", "1"))
 WAKE_WORD = os.getenv("WAKE_WORD", "嘿小奧")
+WAKE_ACK_TEXT = os.getenv("WAKE_ACK_TEXT", "請說")
 WAKE_LISTEN_TIMEOUT_SEC = float(os.getenv("WAKE_LISTEN_TIMEOUT", "8.0"))
 
 WHISPER_INITIAL_PROMPT = "繁體中文日常語音對話。公司名稱：盟立、盟立自動化、盟立集團、MiRLE。"
@@ -482,7 +483,12 @@ async def websocket_stt_endpoint(websocket: WebSocket):
                         is_awake = True
                         wake_listen_deadline = asyncio.get_running_loop().time() + WAKE_LISTEN_TIMEOUT_SEC
                         print(f"[KWS] 偵測到喚醒詞：{WAKE_WORD}")
-                        await websocket.send_json({"type": "status", "status": "awakened", "wake_word": WAKE_WORD})
+                        await websocket.send_json({
+                            "type": "status",
+                            "status": "awakened",
+                            "wake_word": WAKE_WORD,
+                            "ack_text": WAKE_ACK_TEXT,
+                        })
                     continue
 
                 if not is_speaking and asyncio.get_running_loop().time() >= wake_listen_deadline:
